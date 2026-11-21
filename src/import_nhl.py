@@ -42,15 +42,14 @@ def get_regulation_result(game_id, home_id, away_id):
 
     home_goals = 0
     away_goals = 0
-    periods_after_regulation = set()
+    
 
     for play in data.get("plays", []):
         period = play.get("periodDescriptor", {}).get("number")
         period_type = play.get("periodDescriptor", {}).get("periodType")
         event_type = play.get("typeDescKey")
 
-        if isinstance(period, int) and period > 3:
-            periods_after_regulation.add(period_type or str(period))
+        
 
         if event_type != "goal" or not isinstance(period, int) or period > 3:
             continue
@@ -61,12 +60,13 @@ def get_regulation_result(game_id, home_id, away_id):
         elif scoring_team == away_id:
             away_goals += 1
 
-    if home_goals != away_goals:
-        decided_in = "REG"
-    elif "OT" in periods_after_regulation or 4 in periods_after_regulation:
-        decided_in = "OT"
-    elif "SO" in periods_after_regulation:
-        decided_in = "SO"
+        game_outcome = data.get("gameOutcome") or {}
+    decided_in = game_outcome.get("lastPeriodType")
+
+    if decided_in not in {"REG", "OT", "SO"}:
+        raise ValueError(
+            f"Okänd eller saknad sluttyp för match {game_id}: {decided_in}"
+        )
     else:
         raise ValueError(
             f"Kan inte avgöra hur match {game_id} avgjordes "
