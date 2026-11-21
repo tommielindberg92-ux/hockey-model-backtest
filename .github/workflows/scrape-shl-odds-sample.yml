@@ -1,13 +1,13 @@
 
-name: Test BetExplorer historical SHL match odds
+name: Diagnose SharpPick SHL historical odds
 
 on:
   workflow_dispatch:
 
 jobs:
-  test-match-pages:
+  diagnose-sharppick:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -23,125 +23,312 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install requests beautifulsoup4
 
-      - name: Inspect historical match pages
+      - name: Inspect SharpPick SHL archive
         run: |
           mkdir -p artifacts
 
           python - <<'PY'
-          import requests
-          from bs4 import BeautifulSoup
-          from pathlib import Path
+          import json
           import re
           import time
+          from pathlib import Path
+          from urllib.parse import urljoin, urlparse
 
-          base = "https://www.betexplorer.com"
-          archive = (
-              "https://www.betexplorer.com/"
-              "hockey/sweden/shl-2024-2025/results/"
+          import requests
+          from bs4 import BeautifulSoup
+
+          BASE = "https://sharppick.app"
+          ARCHIVE = (
+              "https://sharppick.app/en/league/sweden-shl/"
           )
+
+          output = []
+
+          def log(message):
+              print(message)
+              output.append(str(message))
 
           session = requests.Session()
           session.headers.update({
               "User-Agent": (
                   "Mozilla/5.0 (X11; Linux x86_64) "
-                  "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+                  "AppleWebKit/537.36 Chrome/131.0.0.0 "
+                  "Safari/537.36"
+              ),
+              "Accept": (
+                  "text/html,application/xhtml+xml,"
+                  "application/xml;q=0.9,*/*;q=0.8"
               ),
               "Accept-Language": "en-US,en;q=0.9"
           })
 
-          output = []
+          response = session.get(
+              ARCHIVE,
+              timeout=30
+          )
 
-          def log(value):
-              print(value)
-              output.append(str(value))
+          Path(
+              "artifacts/sharppick_archive.html"
+          ).write_text(
+              response.text,
+              encoding="utf-8"
+          )
 
-          response = session.get(archive, timeout=30)
           log(f"ARCHIVE_STATUS: {response.status_code}")
+          log(f"FINAL_URL: {response.url}")
+          log(f"HTML_LENGTH: {len(response.text)}")
+
           response.raise_for_status()
 
-          soup = BeautifulSoup(response.text, "html.parser")
+          soup = BeautifulSoup(
+              response.text,
+              "html.parser"
+          )
 
-          matches = []
+          title = (
+              soup.title.get_text(" ", strip=True)
+              if soup.title else ""
+          )
+
+          log(f"PAGE_TITLE: {title}")
+
+          page_text = soup.get_text(" ", strip=True)
+
+          log("ARCHIVE_SUMMARY:")
+          for term in [
+              "games archived",
+              "snapshots",
+              "moneyline",
+              "opening line",
+              "closing line"
+          ]:
+              match = re.search(
+                  rf".{{0,100}}{re.escape(term)}.{{0,180}}",
+                  page_text,
+                  re.IGNORECASE
+              )
+              if match:
+                  log(match.group(0))
+
+          # Collect internal links from the archive.
+          links = []
           seen = set()
 
-          for link in soup.select("a[href]"):
-              href = link.get("href", "")
+          for anchor in soup.select("a[href]"):
+              href = anchor.get("href", "").strip()
+              label = anchor.get_text(" ", strip=True)
 
-              if not re.search(
-                  r"/hockey/sweden/shl-2024-2025/.+/",
-                  href
+              if not href:
+                  continue
+
+              url = urljoin(BASE, href)
+              parsed = urlparse(url)
+
+              if parsed.netloc != "sharppick.app":
+                  continue
+
+              if url in seen:
+                  continue
+
+              seen.add(url)
+
+              links.append({
+                  "label": label,
+                  "url": url,
+                  "path": parsed.path
+              })
+
+          log(f"INTERNAL_LINK_COUNT: {len(links)}")
+
+          candidates = []
+
+          for item in links:
+              path = item["path"].lower()
+              label = item["label"].lower()
+
+              if any(
+                  word in path or word in label
+                  for word in [
+                      "game",
+                      "match",
+                      "event",
+                      "odds",
+                      "line"
+                  ]
               ):
-                  continue
+                  candidates.append(item)
 
-              if href in seen:
-                  continue
+          log(f"DETAIL_CANDIDATES: {len(candidates)}")
 
-              seen.add(href)
-              label = link.get_text(" ", strip=True)
+          for item in candidates[:30]:
+              log(
+                  "CANDIDATE: "
+                  + item["label"]
+                  + " | "
+                  + item["url"]
+              )
 
-              if not label:
-                  continue
+          # Inspect embedded data and script references.
+          scripts = soup.find_all("script")
+          log(f"SCRIPT_COUNT: {len(scripts)}")
 
-              matches.append((label, base + href))
+          for index, script in enumerate(scripts):
+              src = script.get("src")
 
-              if len(matches) >= 8:
-                  break
-
-          log(f"MATCH_LINKS_FOUND: {len(matches)}")
-
-          for index, (label, url) in enumerate(matches, 1):
-              log("")
-              log("=" * 70)
-              log(f"MATCH_{index}: {label}")
-              log(f"URL: {url}")
-
-              try:
-                  page = session.get(url, timeout=30)
-                  log(f"HTTP_STATUS: {page.status_code}")
-                  log(f"FINAL_URL: {page.url}")
-
-                  detail = BeautifulSoup(page.text, "html.parser")
-                  title = detail.title.get_text(
-                      " ", strip=True
-                  ) if detail.title else ""
-
-                  log(f"TITLE: {title}")
-
-                  text = detail.get_text(" ", strip=True)
-                  log(f"PAGE_TEXT_LENGTH: {len(text)}")
-                  log(f"PAGE_TEXT: {text[:7000]}")
-
-                  odds_terms = re.findall(
-                      r".{0,100}(?:odds|bookmaker|1x2|"
-                      r"opening|closing|1\s+X\s+2).{0,180}",
-                      text,
-                      flags=re.IGNORECASE
+              if src:
+                  log(
+                      "SCRIPT_SRC: "
+                      + urljoin(BASE, src)
                   )
 
-                  log("ODDS_RELEVANT_TEXT:")
-                  for item in odds_terms[:30]:
-                      log(item)
+              script_text = script.string or script.get_text()
 
-                  filename = f"match_{index}.html"
-                  Path("artifacts", filename).write_text(
-                      page.text,
+              if not script_text:
+                  continue
+
+              if any(
+                  term in script_text.lower()
+                  for term in [
+                      "odds",
+                      "snapshot",
+                      "moneyline",
+                      "gameid",
+                      "eventid"
+                  ]
+              ):
+                  filename = (
+                      f"artifacts/embedded_script_{index}.txt"
+                  )
+
+                  Path(filename).write_text(
+                      script_text,
                       encoding="utf-8"
                   )
 
-              except Exception as error:
-                  log(f"MATCH_ERROR: {error}")
+                  log(
+                      f"ODDS_SCRIPT_FOUND: {filename}"
+                  )
+                  log(
+                      "SCRIPT_PREVIEW: "
+                      + script_text[:2500]
+                  )
 
-              time.sleep(2)
+          # Inspect a small number of likely match pages.
+          inspected = 0
+
+          for item in candidates:
+              if inspected >= 3:
+                  break
+
+              url = item["url"]
+
+              if url.rstrip("/") == ARCHIVE.rstrip("/"):
+                  continue
+
+              inspected += 1
+              log("")
+              log("=" * 60)
+              log(f"DETAIL_PAGE_{inspected}: {url}")
+
+              try:
+                  time.sleep(2)
+
+                  detail_response = session.get(
+                      url,
+                      timeout=30
+                  )
+
+                  log(
+                      "DETAIL_STATUS: "
+                      + str(detail_response.status_code)
+                  )
+
+                  if detail_response.status_code != 200:
+                      continue
+
+                  filename = (
+                      f"artifacts/detail_{inspected}.html"
+                  )
+
+                  Path(filename).write_text(
+                      detail_response.text,
+                      encoding="utf-8"
+                  )
+
+                  detail_soup = BeautifulSoup(
+                      detail_response.text,
+                      "html.parser"
+                  )
+
+                  detail_title = (
+                      detail_soup.title.get_text(
+                          " ", strip=True
+                      )
+                      if detail_soup.title else ""
+                  )
+
+                  log(f"DETAIL_TITLE: {detail_title}")
+
+                  detail_text = detail_soup.get_text(
+                      " ", strip=True
+                  )
+
+                  log(
+                      "DETAIL_TEXT: "
+                      + detail_text[:5000]
+                  )
+
+                  for term in [
+                      "home",
+                      "away",
+                      "moneyline",
+                      "opening",
+                      "closing",
+                      "snapshot",
+                      "odds"
+                  ]:
+                      matches = re.findall(
+                          rf".{{0,100}}{re.escape(term)}"
+                          rf".{{0,180}}",
+                          detail_text,
+                          re.IGNORECASE
+                      )
+
+                      for match in matches[:5]:
+                          log(
+                              f"DETAIL_{term.upper()}: "
+                              + match
+                          )
+
+              except Exception as error:
+                  log(f"DETAIL_ERROR: {error}")
+
+          # Save machine-readable link inventory.
+          Path(
+              "artifacts/sharppick_links.json"
+          ).write_text(
+              json.dumps(
+                  links,
+                  ensure_ascii=False,
+                  indent=2
+              ),
+              encoding="utf-8"
+          )
 
           Path(
-              "artifacts/betexplorer_match_pages.txt"
-          ).write_text("\n".join(output), encoding="utf-8")
+              "artifacts/sharppick_diagnostic.txt"
+          ).write_text(
+              "\n".join(output),
+              encoding="utf-8"
+          )
+
+          log("DIAGNOSTIC_FINISHED")
           PY
 
-      - name: Upload results
+      - name: Upload diagnostic files
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: betexplorer-match-page-test
+          name: sharppick-shl-diagnostic
           path: artifacts/
           if-no-files-found: warn
