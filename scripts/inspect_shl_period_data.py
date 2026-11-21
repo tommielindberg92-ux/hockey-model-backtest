@@ -1,5 +1,5 @@
 
-"""Inspect SHL play-by-play data from a real overtime-decided game."""
+"""Inspect the final regulation events and overtime in an SHL game."""
 
 import requests
 
@@ -19,6 +19,33 @@ PARAMS = {
     "seriesUuid": "qQ9-bb0bzEWUk",
     "gameTypeUuid": "qQ9-af37Ti40B",
 }
+
+
+def event_time_seconds(event):
+    value = event.get("time")
+    if not isinstance(value, str) or ":" not in value:
+        return -1
+
+    try:
+        minutes, seconds = value.split(":")
+        return int(minutes) * 60 + int(seconds)
+    except ValueError:
+        return -1
+
+
+def print_event(event):
+    print({
+        "period": event.get("period"),
+        "time": event.get("time"),
+        "state": event.get("gameState"),
+        "revision": event.get("revision"),
+        "home_score": event.get("homeTeam", {}).get("score"),
+        "away_score": event.get("awayTeam", {}).get("score"),
+        "homeGoals": event.get("homeGoals"),
+        "awayGoals": event.get("awayGoals"),
+        "type": event.get("type"),
+    })
+
 
 response = requests.get(
     SCHEDULE_URL,
@@ -69,41 +96,28 @@ response.raise_for_status()
 events = response.json()
 print("Play-by-play event count:", len(events))
 
-period_three_events = [
+period_three = [
     event for event in events
     if event.get("period") == 3
-    and event.get("time") == "20:00"
-    and event.get("homeTeam", {}).get("score") is not None
-    and event.get("awayTeam", {}).get("score") is not None
 ]
 
-print("\nPeriod 3, time 20:00 snapshots:")
+period_three.sort(key=event_time_seconds, reverse=True)
 
-for event in period_three_events:
-    print({
-        "time": event.get("time"),
-        "state": event.get("gameState"),
-        "revision": event.get("revision"),
-        "home_score": event.get("homeTeam", {}).get("score"),
-        "away_score": event.get("awayTeam", {}).get("score"),
-        "homeGoals": event.get("homeGoals"),
-        "awayGoals": event.get("awayGoals"),
-        "type": event.get("type"),
-    })
+print("\nLatest 20 events in period 3:")
 
-print("\nEvents in period 4:")
+for event in period_three[:20]:
+    print_event(event)
 
-for event in events:
-    if event.get("period") == 4:
-        print({
-            "time": event.get("time"),
-            "state": event.get("gameState"),
-            "revision": event.get("revision"),
-            "home_score": event.get("homeTeam", {}).get("score"),
-            "away_score": event.get("awayTeam", {}).get("score"),
-            "homeGoals": event.get("homeGoals"),
-            "awayGoals": event.get("awayGoals"),
-            "type": event.get("type"),
-        })
+period_four = [
+    event for event in events
+    if event.get("period") == 4
+]
 
-print("\nOvertime inspection finished.")
+period_four.sort(key=event_time_seconds, reverse=True)
+
+print("\nLatest 10 events in period 4:")
+
+for event in period_four[:10]:
+    print_event(event)
+
+print("\nRegulation and overtime inspection finished.")
