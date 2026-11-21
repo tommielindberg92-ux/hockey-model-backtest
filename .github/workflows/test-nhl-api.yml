@@ -3,35 +3,22 @@ name: Verify NHL API
 
 on:
   workflow_dispatch:
-    inputs:
-      game_date:
-        description: "NHL match date (YYYY-MM-DD)"
-        required: true
-        default: "2026-11-19"
 
 jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Verify one real NHL game
-        env:
-          GAME_DATE: ${{ inputs.game_date }}
+      - name: Verify REG, OT and SO games
         run: |
           python - <<'PY'
           import json
-          import os
+          import time
+          from datetime import date, timedelta
           from urllib.request import Request, urlopen
 
-          base = "https://api-web.nhle.com/v1"
-          date = os.environ["GAME_DATE"]
+          BASE = "https://api-web.nhle.com/v1"
+          REQUIRED = {"REG", "OT", "SO"}
+          found = {}
 
           def get_json(url):
               request = Request(
@@ -40,56 +27,87 @@ jobs:
               with urlopen(request, timeout=30) as response:
                   return json.loads(response.read().decode("utf-8"))
 
-          board = get_json(f"{base}/score/{date}")
-          games = [
-              g for g in board.get("games", [])
-              if g.get("gameState") in {"OFF", "FINAL"}
-          ]
+          today = date.today()
 
-          if not games:
-              raise SystemExit(f"No completed NHL games found on {date}")
+          for offset in range(1, 46):
+              day = today - timedelta(days=offset)
+              board = get_json(f"{BASE}/score/{day.isoformat()}")
 
-          game = games[0]
-          game_id = game["id"]
-          home_id = game["homeTeam"]["id"]
-          away_id = game["awayTeam"]["id"]
-          outcome = game.get("gameOutcome") or {}
-          decided_in = outcome.get("lastPeriodType")
+              for game in board.get("games", []):
+                  if game.get("gameState") not in {"OFF", "FINAL"}:
+                      continue
 
-          if decided_in not in {"REG", "OT", "SO"}:
+                  outcome = game.get("gameOutcome") or {}
+                  decided_in = outcome.get("lastPeriodType")
+
+                  if decided_in not in REQUIRED or decided_in in found:
+                      continue
+
+                  game_id = game["id"]
+                  home_id = game["homeTeam"]["id"]
+                  away_id = game["awayTeam"]["id"]
+
+                  data = get_json(
+                      f"{BASE}/gamecenter/{game_id}/play-by-play"
+                  )
+
+                  if "plays" not in data:
+                      raise SystemExit(f"Missing plays for {game_id}")
+
+                  home_goals = 0
+                  away_goals = 0
+
+                  for play in data["plays"]:
+                      period = play.get(
+                          "periodDescriptor", {}
+                      ).get("number")
+
+                      if play.get("typeDescKey") != "goal":
+                          continue
+                      if not isinstance(period, int) or period > 3:
+                          continue
+
+                      team_id = play.get(
+                          "details", {}
+                      ).get("eventOwnerTeamId")
+
+                      if team_id == home_id:
+                          home_goals += 1
+                      elif team_id == away_id:
+                          away_goals += 1
+
+                  tied = home_goals == away_goals
+
+                  if decided_in == "REG" and tied:
+                      raise SystemExit(
+                          f"REG game unexpectedly tied: {game_id}"
+                      )
+
+                  if decided_in in {"OT", "SO"} and not tied:
+                      raise SystemExit(
+                          f"{decided_in} game not tied after 60 min: {game_id}"
+                      )
+
+                  found[decided_in] = (
+                      day.isoformat(), game_id,
+                      home_goals, away_goals
+                  )
+
+                  print(
+                      f"{decided_in}: {day} game {game_id}, "
+                      f"60-minute score {home_goals}-{away_goals}"
+                  )
+
+                  time.sleep(0.2)
+
+              if found.keys() == REQUIRED:
+                  break
+
+          missing = REQUIRED - found.keys()
+          if missing:
               raise SystemExit(
-                  f"Unexpected lastPeriodType: {decided_in!r}"
+                  f"Could not verify these game types: {sorted(missing)}"
               )
 
-          data = get_json(
-              f"{base}/gamecenter/{game_id}/play-by-play"
-          )
-
-          if "plays" not in data:
-              raise SystemExit("Missing plays in play-by-play response")
-
-          home_goals = 0
-          away_goals = 0
-
-          for play in data["plays"]:
-              period = play.get("periodDescriptor", {}).get("number")
-              if play.get("typeDescKey") != "goal":
-                  continue
-              if not isinstance(period, int) or period > 3:
-                  continue
-
-              team_id = play.get("details", {}).get("eventOwnerTeamId")
-              if team_id == home_id:
-                  home_goals += 1
-              elif team_id == away_id:
-                  away_goals += 1
-
-          print("NHL API verification passed")
-          print(f"Date: {date}")
-          print(f"Game ID: {game_id}")
-          print(f"Home: {game['homeTeam'].get('name')}")
-          print(f"Away: {game['awayTeam'].get('name')}")
-          print(f"Last period type: {decided_in}")
-          print(f"Goals after 60 minutes: {home_goals}-{away_goals}")
-          print("Required API fields were found.")
+          print("\nSUCCESS: REG, OT and SO all verified.")
           PY
