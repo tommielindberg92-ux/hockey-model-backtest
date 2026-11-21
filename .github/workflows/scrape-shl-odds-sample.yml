@@ -1,13 +1,13 @@
 
-name: Diagnose BetExplorer SHL archive
+name: Test BetExplorer historical SHL match odds
 
 on:
   workflow_dispatch:
 
 jobs:
-  diagnose:
+  test-match-pages:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -18,24 +18,36 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Playwright
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install playwright
-          python -m playwright install --with-deps chromium
+          python -m pip install requests beautifulsoup4
 
-      - name: Diagnose BetExplorer archive
+      - name: Inspect historical match pages
         run: |
           mkdir -p artifacts
-          python - <<'PY'
-          from pathlib import Path
-          from playwright.sync_api import sync_playwright
 
-          urls = [
-              "https://www.betexplorer.com/hockey/sweden/shl-2024-2025/results/",
-              "https://www.betexplorer.com/hockey/sweden/shl-2024-2025/",
-              "https://www.betexplorer.com/hockey/sweden/shl/results/",
-          ]
+          python - <<'PY'
+          import requests
+          from bs4 import BeautifulSoup
+          from pathlib import Path
+          import re
+          import time
+
+          base = "https://www.betexplorer.com"
+          archive = (
+              "https://www.betexplorer.com/"
+              "hockey/sweden/shl-2024-2025/results/"
+          )
+
+          session = requests.Session()
+          session.headers.update({
+              "User-Agent": (
+                  "Mozilla/5.0 (X11; Linux x86_64) "
+                  "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+              ),
+              "Accept-Language": "en-US,en;q=0.9"
+          })
 
           output = []
 
@@ -43,95 +55,93 @@ jobs:
               print(value)
               output.append(str(value))
 
-          with sync_playwright() as p:
-              request = p.request.new_context(
-                  user_agent=(
-                      "Mozilla/5.0 (X11; Linux x86_64) "
-                      "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-                  ),
-                  extra_http_headers={
-                      "Accept-Language": "en-US,en;q=0.9"
-                  }
-              )
+          response = session.get(archive, timeout=30)
+          log(f"ARCHIVE_STATUS: {response.status_code}")
+          response.raise_for_status()
 
-              for url in urls:
-                  log("")
-                  log("=" * 80)
-                  log(f"URL: {url}")
+          soup = BeautifulSoup(response.text, "html.parser")
 
-                  try:
-                      response = request.get(url, timeout=30000)
-                      log(f"HTTP_STATUS: {response.status}")
-                      log(f"FINAL_URL: {response.url}")
-                      log(
-                          "CONTENT_TYPE: "
-                          + response.headers.get("content-type", "unknown")
-                      )
+          matches = []
+          seen = set()
 
-                      body = response.text()
-                      log(f"BODY_LENGTH: {len(body)}")
-                      log("BODY_PREVIEW:")
-                      log(body[:3500])
+          for link in soup.select("a[href]"):
+              href = link.get("href", "")
 
-                      Path(
-                          "artifacts/betexplorer_"
-                          + str(urls.index(url) + 1)
-                          + ".html"
-                      ).write_text(body, encoding="utf-8")
+              if not re.search(
+                  r"/hockey/sweden/shl-2024-2025/.+/",
+                  href
+              ):
+                  continue
 
-                  except Exception as error:
-                      log(f"REQUEST_ERROR: {error}")
+              if href in seen:
+                  continue
 
-              browser = p.chromium.launch(headless=True)
-              page = browser.new_page()
+              seen.add(href)
+              label = link.get_text(" ", strip=True)
 
-              for url in urls:
-                  log("")
-                  log("=" * 80)
-                  log(f"BROWSER_URL: {url}")
+              if not label:
+                  continue
 
-                  try:
-                      response = page.goto(
-                          url,
-                          wait_until="domcontentloaded",
-                          timeout=45000
-                      )
+              matches.append((label, base + href))
 
-                      log(
-                          "BROWSER_STATUS: "
-                          + (str(response.status) if response else "no response")
-                      )
-                      log(f"BROWSER_FINAL_URL: {page.url}")
-                      log(f"PAGE_TITLE: {page.title()}")
+              if len(matches) >= 8:
+                  break
 
-                      body_text = page.locator("body").inner_text(timeout=10000)
-                      log("PAGE_TEXT:")
-                      log(body_text[:3500])
+          log(f"MATCH_LINKS_FOUND: {len(matches)}")
 
-                      log("MATCH_LINKS:")
-                      links = page.locator("a[href*='/match/']").evaluate_all(
-                          "(els) => els.slice(0, 15).map(a => ({"
-                          "text: a.innerText, href: a.href"
-                          "}))"
-                      )
-                      log(links)
+          for index, (label, url) in enumerate(matches, 1):
+              log("")
+              log("=" * 70)
+              log(f"MATCH_{index}: {label}")
+              log(f"URL: {url}")
 
-                  except Exception as error:
-                      log(f"BROWSER_ERROR: {error}")
+              try:
+                  page = session.get(url, timeout=30)
+                  log(f"HTTP_STATUS: {page.status_code}")
+                  log(f"FINAL_URL: {page.url}")
 
-              browser.close()
-              request.dispose()
+                  detail = BeautifulSoup(page.text, "html.parser")
+                  title = detail.title.get_text(
+                      " ", strip=True
+                  ) if detail.title else ""
 
-          Path("artifacts/betexplorer_diagnostic.txt").write_text(
-              "\n".join(output),
-              encoding="utf-8"
-          )
+                  log(f"TITLE: {title}")
+
+                  text = detail.get_text(" ", strip=True)
+                  log(f"PAGE_TEXT_LENGTH: {len(text)}")
+                  log(f"PAGE_TEXT: {text[:7000]}")
+
+                  odds_terms = re.findall(
+                      r".{0,100}(?:odds|bookmaker|1x2|"
+                      r"opening|closing|1\s+X\s+2).{0,180}",
+                      text,
+                      flags=re.IGNORECASE
+                  )
+
+                  log("ODDS_RELEVANT_TEXT:")
+                  for item in odds_terms[:30]:
+                      log(item)
+
+                  filename = f"match_{index}.html"
+                  Path("artifacts", filename).write_text(
+                      page.text,
+                      encoding="utf-8"
+                  )
+
+              except Exception as error:
+                  log(f"MATCH_ERROR: {error}")
+
+              time.sleep(2)
+
+          Path(
+              "artifacts/betexplorer_match_pages.txt"
+          ).write_text("\n".join(output), encoding="utf-8")
           PY
 
-      - name: Upload diagnostic
+      - name: Upload results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: betexplorer-diagnostic
+          name: betexplorer-match-page-test
           path: artifacts/
           if-no-files-found: warn
