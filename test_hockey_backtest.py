@@ -212,3 +212,45 @@ def test_nhl_regulation_result_rejects_inconsistent_decision(monkeypatch):
 
     with pytest.raises(ValueError, match="OT-match"):
         get_regulation_result(123, 1, 2, "OT")
+
+from src.import_sweden import parse_period_scores
+
+
+def test_sweden_importer_sums_only_three_periods():
+    periods = [
+        {"Home": 1, "Away": 0},
+        {"Home": 0, "Away": 1},
+        {"Home": 1, "Away": 1},
+        {"Home": 1, "Away": 0},  # Övertid – ska ignoreras
+    ]
+
+    home, away = parse_period_scores(periods)
+
+    assert home == 2
+    assert away == 2
+
+
+def test_sweden_importer_accepts_json_period_scores():
+    periods = '[{"Home": 1, "Away": 0}, {"Home": 0, "Away": 1}, {"Home": 1, "Away": 1}]'
+
+    home, away = parse_period_scores(periods)
+
+    assert home == 2
+    assert away == 2
+
+
+def test_sweden_importer_rejects_missing_periods():
+    with pytest.raises(ValueError, match="Saknade periodresultat"):
+        parse_period_scores([{"Home": 1, "Away": 0}])
+
+
+def test_sweden_importer_rejects_negative_goals():
+    periods = [
+        {"Home": 1, "Away": 0},
+        {"Home": -1, "Away": 1},
+        {"Home": 0, "Away": 0},
+    ]
+
+    with pytest.raises(ValueError, match="Negativt"):
+        parse_period_scores(periods)
+
