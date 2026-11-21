@@ -1,0 +1,36 @@
+
+name: Run HockeyAllsvenskan V7 Goal Model
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run V7 goal model backtest
+        run: |
+          python -m src.hockey_backtest_v7 \
+            --input data/ha_matches.csv \
+            --output v7_predictions.csv
+
+      - name: Upload V7 predictions
+        uses: actions/upload-artifact@v4
+        with:
+          name: hockey-allsvenskan-v7-predictions
+          path: v7_predictions.csv
+          retention-days: 90
