@@ -303,10 +303,12 @@ def backtest(matches):
                     + (1.0 - shrinkage) * float(row["px"])
                 )
 
+            # FIX: This is already a 1D vector for one match.
+            # Do not index [0], which would select a scalar.
             probabilities = adjust_probabilities(
                 base_probabilities,
                 final_draw,
-            )[0]
+            )
 
             actual = str(row["actual"])
 
