@@ -1,0 +1,36 @@
+
+name: Run Bivariate Poisson Model
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Bivariate Poisson model backtest
+        run: |
+          python -m src.hockey_backtest_bivariate \
+            --input data/ha_matches.csv \
+            --output bivariate_predictions.csv
+
+      - name: Upload Bivariate Poisson predictions
+        uses: actions/upload-artifact@v4
+        with:
+          name: bivariate-poisson-predictions
+          path: bivariate_predictions.csv
+          retention-days: 90
