@@ -36,7 +36,13 @@ def team_name(team):
         return name.get("default", "")
     return str(name)
 
-def get_regulation_result(game_id, home_id, away_id):
+def get_regulation_result(game_id, home_id, away_id, decided_in):
+    """Return goals after 60 minutes and the outcome type from the scoreboard."""
+    if decided_in not in {"REG", "OT", "SO"}:
+        raise ValueError(
+            f"Okänd eller saknad sluttyp för match {game_id}: {decided_in}"
+        )
+
     data = get_json(f"{BASE_URL}/gamecenter/{game_id}/play-by-play")
 
     home_goals = 0
@@ -54,14 +60,6 @@ def get_regulation_result(game_id, home_id, away_id):
             home_goals += 1
         elif scoring_team == away_id:
             away_goals += 1
-
-    game_outcome = data.get("gameOutcome") or {}
-    decided_in = game_outcome.get("lastPeriodType")
-
-    if decided_in not in {"REG", "OT", "SO"}:
-        raise ValueError(
-            f"Okänd eller saknad sluttyp för match {game_id}: {decided_in}"
-        )
 
     return home_goals, away_goals, decided_in
 
