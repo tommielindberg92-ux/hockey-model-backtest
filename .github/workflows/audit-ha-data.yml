@@ -1,0 +1,31 @@
+
+name: Audit HockeyAllsvenskan data
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run data audit
+        run: python scripts/audit_swedish_data_sources.py
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: ha-data-audit
+          path: ha_data_audit.json
+          if-no-files-found: error
