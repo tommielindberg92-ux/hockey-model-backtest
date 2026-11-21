@@ -1,88 +1,55 @@
 
-"""Discover SHL game schedule and period-data API endpoints."""
+"""Find SHL season, series and game-type UUIDs."""
 
 import json
 import requests
 
-BASE = "https://www.shl.se/api"
+URL = "https://www.shl.se/api/statistics-v2/layout-info"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "application/json, text/plain, */*",
-    "Referer": "https://www.shl.se/",
-}
+response = requests.get(
+    URL,
+    headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"},
+    timeout=30,
+)
+response.raise_for_status()
+data = response.json()
 
-session = requests.Session()
-session.headers.update(HEADERS)
+print("Layout downloaded successfully.")
+print("Top-level type:", type(data).__name__)
 
-tests = [
-    (
-        "sports-v2 schedule, no parameters",
-        f"{BASE}/sports-v2/game-schedule",
-        {},
-    ),
-    (
-        "sports-v2 schedule, season 2025",
-        f"{BASE}/sports-v2/game-schedule",
-        {"season": "2025"},
-    ),
-    (
-        "sports-v2 schedule, seasonUuid",
-        f"{BASE}/sports-v2/game-schedule",
-        {"seasonUuid": "qeb-73qtP8d19"},
-    ),
-    (
-        "gameday schedule",
-        f"{BASE}/gameday/game-schedule",
-        {},
-    ),
-    (
-        "gameday overview using game ID",
-        f"{BASE}/gameday/game-overview/20460",
-        {},
-    ),
-    (
-        "gameday play-by-play using game ID",
-        f"{BASE}/gameday/play-by-play/20460",
-        {},
-    ),
-    (
-        "statistics game details",
-        f"https://www.shl.se/api/statistics-v2/stats-info/games_games",
-        {"count": "3", "ssgtUuid": "qeb-73qtP8d19"},
-    ),
-]
 
-for label, url, params in tests:
-    print("\n" + "=" * 75)
-    print(label)
-    print("URL:", url)
-    print("Parameters:", params)
+def inspect(value, path="root"):
+    if isinstance(value, dict):
+        keys = {str(key).lower(): key for key in value}
 
-    try:
-        response = session.get(
-            url,
-            params=params,
-            timeout=30,
-        )
+        if "uuid" in keys:
+            selected = {}
+            for key, item in value.items():
+                name = str(key).lower()
+                if (
+                    name in {"uuid", "code", "name", "displayname",
+                             "translation", "type", "season", "series"}
+                    or "name" in name
+                ):
+                    if isinstance(item, (str, int, float, bool)):
+                        selected[key] = item
 
-        print("HTTP status:", response.status_code)
-        print("Final URL:", response.url)
-        print("Content type:", response.headers.get("Content-Type"))
+            text = json.dumps(selected, ensure_ascii=False).lower()
+            if any(word in text for word in (
+                "shl", "regular", "grund", "season", "game",
+                "match", "serie", "2025", "2026"
+            )):
+                print("\nPATH:", path)
+                print(json.dumps(selected, ensure_ascii=False))
 
-        try:
-            payload = response.json()
-            print(
-                json.dumps(
-                    payload,
-                    ensure_ascii=False,
-                    indent=2,
-                )[:7000]
-            )
-        except ValueError:
-            print(response.text[:3000])
+        for key, item in value.items():
+            inspect(item, f"{path}.{key}")
 
-    except requests.RequestException as error:
-        print("REQUEST ERROR:", repr(error))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            inspect(item, f"{path}[{index}]")
 
-print("\nAPI discovery finished.")
+
+inspect(data)
+
+print("\nUUID discovery finished.")
