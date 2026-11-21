@@ -1,0 +1,36 @@
+
+name: Run Conditional Draw Model
+
+on:
+  workflow_dispatch:
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run Conditional Draw model backtest
+        run: |
+          python -m src.hockey_backtest_conditional_draw \
+            --input data/ha_matches.csv \
+            --output conditional_draw_predictions.csv
+
+      - name: Upload Conditional Draw predictions
+        uses: actions/upload-artifact@v4
+        with:
+          name: conditional-draw-predictions
+          path: conditional_draw_predictions.csv
+          retention-days: 90
