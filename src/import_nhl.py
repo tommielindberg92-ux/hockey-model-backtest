@@ -88,9 +88,12 @@ def import_nhl(start_date, end_date, output_file):
                 continue
 
             try:
-                home_goals, away_goals, decided_in = get_regulation_result(
-                    game_id, home_id, away_id
-                )
+    game_outcome = game.get("gameOutcome") or {}
+    decided_in = game_outcome.get("lastPeriodType")
+
+    home_goals, away_goals, decided_in = get_regulation_result(
+        game_id, home_id, away_id, decided_in
+    )
             except (RuntimeError, ValueError, KeyError) as exc:
                 print(f"VARNING: match {game_id} hoppades över: {exc}")
                 continue
