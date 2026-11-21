@@ -30,3 +30,47 @@ def test_backtest_returns_one_row_per_match_and_valid_probabilities():
 def test_missing_columns_raise_error():
     with pytest.raises(ValueError):
         backtest(pd.DataFrame([{"date": "2026-01-01"}]))
+
+from src.import_historical import convert_period_results
+
+
+def sample_period_match():
+    return {
+        "date": "2026-01-01",
+        "league": "SHL",
+        "home_team": "Team A",
+        "away_team": "Team B",
+        "p1_home": 1, "p1_away": 0,
+        "p2_home": 0, "p2_away": 1,
+        "p3_home": 1, "p3_away": 1,
+        "decided_in": "OT",
+        "source": "official match report",
+        "ot_home": 1, "ot_away": 0,
+        "shootout_home": 1, "shootout_away": 0,
+    }
+
+
+def test_importer_sums_only_three_regulation_periods():
+    result = convert_period_results(pd.DataFrame([sample_period_match()]))
+    match = result.iloc[0]
+    assert match["reg_home_goals"] == 2
+    assert match["reg_away_goals"] == 2
+    assert match["decided_in"] == "OT"
+
+
+def test_importer_rejects_duplicate_matches():
+    row = sample_period_match()
+    with pytest.raises(ValueError, match="Duplicate"):
+        convert_period_results(pd.DataFrame([row, row]))
+
+
+def test_importer_rejects_missing_columns():
+    with pytest.raises(ValueError, match="Missing columns"):
+        convert_period_results(pd.DataFrame([{"date": "2026-01-01"}]))
+
+
+def test_importer_rejects_negative_period_goals():
+    row = sample_period_match()
+    row["p2_home"] = -1
+    with pytest.raises(ValueError, match="non-negative"):
+        convert_period_results(pd.DataFrame([row]))
