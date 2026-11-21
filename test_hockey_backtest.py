@@ -72,5 +72,5 @@ def test_importer_rejects_missing_columns():
 def test_importer_rejects_negative_period_goals():
     row = sample_period_match()
     row["p2_home"] = -1
-    with pytest.raises(ValueError, match="non-negative"):
+    with pytest.raises(ValueError, match="Invalid goals"):
         convert_period_results(pd.DataFrame([row]))
