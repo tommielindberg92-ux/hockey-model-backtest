@@ -102,11 +102,13 @@ class FeatureState:
             "elo_diff": home_elo - away_elo,
             "home_elo": home_elo,
             "away_elo": away_elo,
-            "previous_home_rate": self.home_rates.get(
-                league, 0.47
+            "previous_home_rate": (
+                float(np.mean(self.home_rates[league]))
+                if self.home_rates.get(league) else 0.47
             ),
-            "previous_draw_rate": self.draw_rates.get(
-                league, 0.21
+            "previous_draw_rate": (
+                float(np.mean(self.draw_rates[league]))
+                if self.draw_rates.get(league) else 0.21
             ),
         }
 
@@ -169,9 +171,6 @@ class FeatureState:
         home_rates.append(int(hg > ag))
         draw_rates.append(int(hg == ag))
 
-        self.home_rates[league] = float(np.mean(home_rates))
-        self.draw_rates[league] = float(np.mean(draw_rates))
-
 
 def backtest(matches):
     missing = REQUIRED - set(matches.columns)
@@ -213,7 +212,7 @@ def backtest(matches):
     for date, day in data.groupby("date", sort=True):
         season = season_key(date)
 
-        # Fit only on completed previous seasons.
+        # Train only on completed previous seasons.
         if season != current_season:
             current_season = season
             model = None
@@ -244,7 +243,7 @@ def backtest(matches):
 
         day_records = []
 
-        # Prepare V3 decay and create all predictions before updates.
+        # Predict every match on this date before updating results.
         for row in day.itertuples(index=False):
             league = str(row.league)
 
@@ -269,7 +268,6 @@ def backtest(matches):
                 for index, class_label in enumerate(model.classes_):
                     ml_probs[int(class_label)] = ml_raw[index]
 
-                # Initial ensemble weight; later tune on validation only.
                 probs = 0.65 * ml_probs + 0.35 * base_probs
                 probs = probs / probs.sum()
             else:
@@ -305,7 +303,7 @@ def backtest(matches):
                 "row": row,
             })
 
-        # Update only after every match on this date was predicted.
+        # Update only after all matches on this date were predicted.
         for record in day_records:
             row = record["row"]
 
@@ -319,7 +317,7 @@ def backtest(matches):
                 int(row.reg_away_goals),
             )
 
-            # Crucial: save the pre-match feature snapshot.
+            # Store pre-match feature snapshot for future training.
             feature_rows.append(record["features"])
             target_rows.append(record["target"])
             output.append(record["output"])
