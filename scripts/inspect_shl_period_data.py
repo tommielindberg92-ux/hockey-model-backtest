@@ -1,9 +1,11 @@
-"""Inspect the actual structure of the SHL schedule response."""
+"""Inspect SHL play-by-play data from a real overtime game."""
 
-import json
 import requests
 
-SCHEDULE_URL = "https://www.shl.se/api/sports-v2/game-schedule"
+BASE = "https://www.shl.se/api"
+
+SCHEDULE_URL = f"{BASE}/sports-v2/game-schedule"
+PLAY_BY_PLAY_URL = f"{BASE}/gameday/play-by-play"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -12,7 +14,7 @@ HEADERS = {
 }
 
 PARAMS = {
-    "seasonUuid": "qeb-73bZkIm9A",
+    "seasonUuid": "qeb-73qtP8d19",
     "seriesUuid": "qQ9-bb0bzEWUk",
     "gameTypeUuid": "qQ9-af37Ti40B",
 }
@@ -23,60 +25,71 @@ response = requests.get(
     headers=HEADERS,
     timeout=30,
 )
-
-print("HTTP status:", response.status_code)
 response.raise_for_status()
 
 data = response.json()
+games = data.get("gameInfo", [])
 
-print("\nTop-level type:", type(data).__name__)
+print("Games in schedule:", len(games))
 
-if isinstance(data, dict):
-    print("Top-level keys:", list(data.keys()))
+overtime_games = [
+    game for game in games
+    if game.get("overtime") or game.get("shootout")
+]
 
-    for key, value in data.items():
-        print(f"\nKEY: {key}")
-        print("TYPE:", type(value).__name__)
+print("Overtime/shootout games:", len(overtime_games))
 
-        if isinstance(value, list):
-            print("NUMBER OF ITEMS:", len(value))
+if not overtime_games:
+    print("No overtime games found.")
+    raise SystemExit(0)
 
-            if value:
-                print("FIRST ITEM TYPE:", type(value[0]).__name__)
-                print(
-                    json.dumps(
-                        value[0],
-                        ensure_ascii=False,
-                        indent=2,
-                    )[:12000]
-                )
+game = overtime_games[0]
+game_uuid = game["uuid"]
 
-        elif isinstance(value, dict):
-            print(
-                json.dumps(
-                    value,
-                    ensure_ascii=False,
-                    indent=2,
-                )[:6000]
-            )
+home = game.get("homeTeamInfo", {})
+away = game.get("awayTeamInfo", {})
 
-        else:
-            print(str(value)[:2000])
+print("\nSelected game:")
+print("UUID:", game_uuid)
+print("Date:", game.get("startDateTime"))
+print("Home:", home.get("names", {}).get("long"))
+print("Away:", away.get("names", {}).get("long"))
+print("Final score:", home.get("score"), "-", away.get("score"))
+print("Overtime:", game.get("overtime"))
+print("Shootout:", game.get("shootout"))
 
-elif isinstance(data, list):
-    print("Number of items:", len(data))
+response = requests.get(
+    f"{PLAY_BY_PLAY_URL}/{game_uuid}",
+    headers=HEADERS,
+    timeout=30,
+)
+response.raise_for_status()
 
-    if data:
-        print(
-            json.dumps(
-                data[0],
-                ensure_ascii=False,
-                indent=2,
-            )[:12000]
-        )
+events = response.json()
 
-else:
-    print("Response:")
-    print(str(data)[:12000])
+print("\nPlay-by-play event count:", len(events))
 
-print("\nSchedule structure inspection finished.")
+if events:
+    print("Event fields:", list(events[0].keys()))
+
+print("\nEvents from period 3 onward:")
+
+for event in events:
+    period = event.get("period", 0)
+
+    if period >= 3:
+        home_event = event.get("homeTeam", {})
+        away_event = event.get("awayTeam", {})
+
+        print({
+            "period": period,
+            "time": event.get("time"),
+            "state": event.get("gameState"),
+            "revision": event.get("revision"),
+            "home_score": home_event.get("score"),
+            "away_score": away_event.get("score"),
+            "event_type": event.get("eventType"),
+            "description": event.get("description"),
+        })
+
+print("\nOvertime inspection finished.")
