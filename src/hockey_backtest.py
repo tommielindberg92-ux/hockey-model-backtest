@@ -1,5 +1,4 @@
-
-"""Kronologiskt backtest för hockey 1X2 efter ordinarie tid."""
+"""Kronologiskt hockey-backtest: 1X2 efter ordinarie tid."""
 
 from __future__ import annotations
 
@@ -33,6 +32,7 @@ def regulation_probabilities(
     away = [_poisson_pmf(i, away_lambda) for i in range(max_goals + 1)]
 
     p1 = px = p2 = 0.0
+
     for h, ph in enumerate(home):
         for a, pa in enumerate(away):
             probability = ph * pa
@@ -49,51 +49,90 @@ def regulation_probabilities(
 
 @dataclass
 class LeagueState:
-    ratings: Dict[str, float] = field(default_factory=dict)
+    elo: Dict[str, float] = field(default_factory=dict)
+    attack: Dict[str, float] = field(default_factory=dict)
+    defence: Dict[str, float] = field(default_factory=dict)
     home_goal_sum: float = 0.0
     away_goal_sum: float = 0.0
     games: int = 0
 
     def rating(self, team: str) -> float:
-        return self.ratings.get(team, 1500.0)
+        return self.elo.get(team, 1500.0)
+
+    def attack_rating(self, team: str) -> float:
+        return self.attack.get(team, 0.0)
+
+    def defence_rating(self, team: str) -> float:
+        return self.defence.get(team, 0.0)
 
     def goal_rates(self) -> Tuple[float, float]:
         if self.games < 10:
             return 2.8, 2.8
 
         return (
-            max(0.5, self.home_goal_sum / self.games),
-            max(0.5, self.away_goal_sum / self.games),
+            max(1.5, self.home_goal_sum / self.games),
+            max(1.5, self.away_goal_sum / self.games),
         )
 
 
 class EloPoissonModel:
-    def __init__(self, k_factor: float = 20.0, home_advantage: float = 55.0):
+    def __init__(
+        self,
+        k_factor: float = 20.0,
+        home_advantage: float = 55.0,
+        rating_learning_rate: float = 0.045,
+    ):
         self.k_factor = k_factor
         self.home_advantage = home_advantage
+        self.rating_learning_rate = rating_learning_rate
         self.states: Dict[str, LeagueState] = {}
 
     def _state(self, league: str) -> LeagueState:
         return self.states.setdefault(league, LeagueState())
 
+    def expected_goals(
+        self, league: str, home_team: str, away_team: str
+    ) -> Tuple[float, float]:
+        state = self._state(league)
+        base_home, base_away = state.goal_rates()
+
+        elo_difference = (
+            state.rating(home_team)
+            - state.rating(away_team)
+            + self.home_advantage
+        )
+
+        # Elo påverkar målskillnaden, men begränsas för att undvika
+        # orimligt stora prognoser.
+        elo_effect = max(-0.25, min(0.25, elo_difference / 400.0 * 0.20))
+
+        home_strength = (
+            state.attack_rating(home_team)
+            + state.defence_rating(away_team)
+        )
+        away_strength = (
+            state.attack_rating(away_team)
+            + state.defence_rating(home_team)
+        )
+
+        home_lambda = base_home * math.exp(
+            max(-0.65, min(0.65, home_strength + elo_effect))
+        )
+        away_lambda = base_away * math.exp(
+            max(-0.65, min(0.65, away_strength - elo_effect))
+        )
+
+        return (
+            max(0.5, min(6.0, home_lambda)),
+            max(0.5, min(6.0, away_lambda)),
+        )
+
     def predict(
         self, league: str, home_team: str, away_team: str
     ) -> Tuple[float, float, float]:
-        state = self._state(league)
-
-        home_elo = state.rating(home_team) + self.home_advantage
-        away_elo = state.rating(away_team)
-
-        elo_home_share = 1.0 / (
-            1.0 + 10.0 ** ((away_elo - home_elo) / 400.0)
+        home_lambda, away_lambda = self.expected_goals(
+            league, home_team, away_team
         )
-
-        base_home, base_away = state.goal_rates()
-        strength = (elo_home_share - 0.5) * 0.65
-
-        home_lambda = max(0.5, base_home + strength)
-        away_lambda = max(0.5, base_away - strength)
-
         return regulation_probabilities(home_lambda, away_lambda)
 
     def update(
@@ -106,28 +145,68 @@ class EloPoissonModel:
     ) -> None:
         state = self._state(league)
 
+        # Beräkna förväntade mål med informationen före matchen.
+        home_lambda, away_lambda = self.expected_goals(
+            league, home_team, away_team
+        )
+
+        # Uppdatera Elo.
         home_rating = state.rating(home_team)
         away_rating = state.rating(away_team)
 
-        expected = 1.0 / (
+        expected_home = 1.0 / (
             1.0 + 10.0 ** (
                 (away_rating - (home_rating + self.home_advantage)) / 400.0
             )
         )
 
         if home_goals > away_goals:
-            actual = 1.0
+            actual_home = 1.0
         elif home_goals == away_goals:
-            actual = 0.5
+            actual_home = 0.5
         else:
-            actual = 0.0
+            actual_home = 0.0
 
         margin = abs(home_goals - away_goals)
         multiplier = math.log1p(margin) if margin else 1.0
-        change = self.k_factor * multiplier * (actual - expected)
+        change = self.k_factor * multiplier * (
+            actual_home - expected_home
+        )
 
-        state.ratings[home_team] = home_rating + change
-        state.ratings[away_team] = away_rating - change
+        state.elo[home_team] = home_rating + change
+        state.elo[away_team] = away_rating - change
+
+        # Uppdatera anfall och försvar med målutfallet.
+        # Positiv försvarsrating betyder att laget släpper in fler mål.
+        lr = self.rating_learning_rate
+
+        home_residual = math.log(
+            (home_goals + 0.5) / (home_lambda + 0.5)
+        )
+        away_residual = math.log(
+            (away_goals + 0.5) / (away_lambda + 0.5)
+        )
+
+        home_residual = max(-0.8, min(0.8, home_residual))
+        away_residual = max(-0.8, min(0.8, away_residual))
+
+        state.attack[home_team] = max(
+            -0.8,
+            min(0.8, state.attack_rating(home_team) + lr * home_residual),
+        )
+        state.defence[away_team] = max(
+            -0.8,
+            min(0.8, state.defence_rating(away_team) + lr * home_residual),
+        )
+
+        state.attack[away_team] = max(
+            -0.8,
+            min(0.8, state.attack_rating(away_team) + lr * away_residual),
+        )
+        state.defence[home_team] = max(
+            -0.8,
+            min(0.8, state.defence_rating(home_team) + lr * away_residual),
+        )
 
         state.home_goal_sum += home_goals
         state.away_goal_sum += away_goals
@@ -163,14 +242,13 @@ def backtest(matches: pd.DataFrame) -> pd.DataFrame:
     model = EloPoissonModel()
     rows = []
 
-    # Process one complete date at a time.
+    # Alla matcher samma datum prognostiseras innan någon uppdatering sker.
     for match_date, day in data.groupby("date", sort=True):
         day_updates = []
 
-        # First predict every match using only earlier dates.
         for row in day.itertuples(index=False):
             probabilities = model.predict(
-                row.league, row.home_team, row.away_team
+                str(row.league), str(row.home_team), str(row.away_team)
             )
 
             hg = int(row.reg_home_goals)
@@ -181,6 +259,7 @@ def backtest(matches: pd.DataFrame) -> pd.DataFrame:
             actual_outcome[actual_index] = 1.0
 
             p = np.asarray(probabilities)
+
             rows.append({
                 "date": match_date,
                 "league": row.league,
@@ -198,10 +277,13 @@ def backtest(matches: pd.DataFrame) -> pd.DataFrame:
             })
 
             day_updates.append((
-                row.league, row.home_team, row.away_team, hg, ag
+                str(row.league),
+                str(row.home_team),
+                str(row.away_team),
+                hg,
+                ag,
             ))
 
-        # Only after all predictions for the date are made, update.
         for update in day_updates:
             model.update(*update)
 
@@ -220,10 +302,23 @@ def main() -> None:
     results.to_csv(args.output, index=False)
 
     print(f"Matcher analyserade: {len(results)}")
+
     if len(results):
         print(f"Träffsäkerhet: {results.correct.mean():.3f}")
         print(f"Genomsnittlig Brier score: {results.brier.mean():.4f}")
         print(f"Genomsnittlig log loss: {results.log_loss.mean():.4f}")
+
+        print("\nModellens val av utfall:")
+        print(
+            results[["p1", "px", "p2"]]
+            .idxmax(axis=1)
+            .value_counts()
+            .rename(index={"p1": "1", "px": "X", "p2": "2"})
+            .to_string()
+        )
+
+        print("\nGenomsnittliga sannolikheter:")
+        print(results[["p1", "px", "p2"]].mean().round(3).to_string())
 
 
 if __name__ == "__main__":
