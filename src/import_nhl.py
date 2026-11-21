@@ -87,7 +87,7 @@ def import_nhl(start_date, end_date, output_file):
                 print(f"Hoppar över match med ofullständig information: {game_id}")
                 continue
 
-                try:
+            try:
                 game_outcome = game.get("gameOutcome") or {}
                 decided_in = game_outcome.get("lastPeriodType")
 
