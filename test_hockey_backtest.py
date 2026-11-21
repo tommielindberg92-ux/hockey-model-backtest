@@ -74,3 +74,70 @@ def test_importer_rejects_negative_period_goals():
     row["p2_home"] = -1
     with pytest.raises(ValueError, match="Invalid goals"):
         convert_period_results(pd.DataFrame([row]))
+from src.import_nhl import get_regulation_result
+
+
+def test_nhl_regulation_result_excludes_overtime(monkeypatch):
+    def fake_get_json(url):
+        return {
+            "plays": [
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 1},
+                    "details": {"eventOwnerTeamId": 1},
+                },
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 2},
+                    "details": {"eventOwnerTeamId": 2},
+                },
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 4, "periodType": "OT"},
+                    "details": {"eventOwnerTeamId": 1},
+                },
+            ]
+        }
+
+    monkeypatch.setattr("src.import_nhl.get_json", fake_get_json)
+
+    home, away, decided = get_regulation_result(123, 1, 2)
+
+    assert home == 1
+    assert away == 1
+    assert decided == "OT"
+
+
+def test_nhl_regulation_result_counts_three_periods():
+    def fake_get_json(url):
+        return {
+            "plays": [
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 1},
+                    "details": {"eventOwnerTeamId": 1},
+                },
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 2},
+                    "details": {"eventOwnerTeamId": 1},
+                },
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 3},
+                    "details": {"eventOwnerTeamId": 2},
+                },
+            ]
+        }
+
+    import src.import_nhl
+    original = src.import_nhl.get_json
+    src.import_nhl.get_json = fake_get_json
+    try:
+        home, away, decided = get_regulation_result(123, 1, 2)
+    finally:
+        src.import_nhl.get_json = original
+
+    assert home == 2
+    assert away == 1
+    assert decided == "REG"
