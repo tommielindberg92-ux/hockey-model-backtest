@@ -307,7 +307,7 @@ def backtest(matches):
             direction_model = None
 
             if len(feature_rows) >= 500:
-                draw_model, direction_model = train_models(
+                draw_model, direction_model, draw_correction_weight = train_models(
                     feature_rows,
                     target_rows,
                 )
