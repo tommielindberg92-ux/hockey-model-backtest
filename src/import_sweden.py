@@ -4,6 +4,9 @@
 import argparse
 import csv
 import json
+import socket
+import time
+import urllib.error
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -34,7 +37,9 @@ COLUMNS = [
 ]
 
 
-def request_json(url, data=None, headers=None):
+def request_json(url, data=None, headers=None, attempts=5, timeout=90):
+    """Hämta JSON med återförsök vid tillfälliga nätverks- och serverfel."""
+
     request_headers = {
         "User-Agent": "hockey-model-backtest/1.0",
         "Accept": "application/json",
@@ -42,15 +47,54 @@ def request_json(url, data=None, headers=None):
     if headers:
         request_headers.update(headers)
 
-    request = Request(
-        url,
-        data=data,
-        headers=request_headers,
-        method="POST" if data is not None else "GET",
-    )
+    for attempt in range(1, attempts + 1):
+        request = Request(
+            url,
+            data=data,
+            headers=request_headers,
+            method="POST" if data is not None else "GET",
+        )
 
-    with urlopen(request, timeout=60) as response:
-        return json.loads(response.read().decode("utf-8"))
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+
+        except urllib.error.HTTPError as exc:
+            retryable = exc.code in {408, 425, 429, 500, 502, 503, 504}
+
+            if not retryable or attempt == attempts:
+                raise
+
+            retry_after = exc.headers.get("Retry-After")
+            try:
+                delay = min(float(retry_after), 60) if retry_after else min(2 ** attempt, 30)
+            except (TypeError, ValueError):
+                delay = min(2 ** attempt, 30)
+
+            print(
+                f"HTTP {exc.code} vid hämtning. "
+                f"Försök {attempt}/{attempts}. Väntar {delay:.0f} sekunder."
+            )
+            time.sleep(delay)
+
+        except (
+            TimeoutError,
+            socket.timeout,
+            urllib.error.URLError,
+            ConnectionError,
+        ) as exc:
+            if attempt == attempts:
+                print(f"API-anrop misslyckades efter {attempts} försök: {url}")
+                raise
+
+            delay = min(2 ** attempt, 30)
+            print(
+                f"Nätverksfel vid hämtning: {exc}. "
+                f"Försök {attempt}/{attempts}. Väntar {delay} sekunder."
+            )
+            time.sleep(delay)
+
+    raise RuntimeError(f"Kunde inte hämta data från {url}")
 
 
 def merge_rows(output_file, new_rows):
