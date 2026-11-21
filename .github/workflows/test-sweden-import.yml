@@ -1,0 +1,73 @@
+
+name: Test HockeyAllsvenskan import
+
+on:
+  workflow_dispatch:
+
+jobs:
+  import-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Import 2025/26 season
+        run: |
+          python -m src.import_sweden --season 2026 --phase HA --output data/ha_matches.csv
+
+      - name: Validate imported data
+        run: |
+          python - <<'PY'
+          import csv
+          from pathlib import Path
+
+          path = Path("data/ha_matches.csv")
+          if not path.exists():
+              raise SystemExit("CSV-filen skapades inte.")
+
+          with path.open(encoding="utf-8", newline="") as file:
+              rows = list(csv.DictReader(file))
+
+          if not rows:
+              raise SystemExit("Importen gav inga matcher.")
+
+          required = {
+              "date", "league", "home_team", "away_team",
+              "reg_home_goals", "reg_away_goals", "decided_in", "source",
+          }
+          if not required.issubset(rows[0]):
+              raise SystemExit("CSV-filen saknar obligatoriska kolumner.")
+
+          for row in rows:
+              home = int(row["reg_home_goals"])
+              away = int(row["reg_away_goals"])
+              decision = row["decided_in"]
+
+              if home < 0 or away < 0:
+                  raise SystemExit("Negativt målantal hittades.")
+
+              if decision == "FT" and home == away:
+                  raise SystemExit("FT-match är oavgjord efter 60 minuter.")
+
+              if decision in {"OT", "SO"} and home != away:
+                  raise SystemExit("OT/SO-match är inte oavgjord efter 60 minuter.")
+
+          print(f"Godkänt: {len(rows)} matcher importerades.")
+          print(f"Första match: {rows[0]['date']}")
+          print(f"Sista match: {rows[-1]['date']}")
+          PY
+
+      - name: Upload imported CSV
+        uses: actions/upload-artifact@v4
+        with:
+          name: hockeyallsvenskan-2025-26
+          path: data/ha_matches.csv
