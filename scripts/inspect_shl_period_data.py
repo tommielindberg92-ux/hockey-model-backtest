@@ -1,10 +1,13 @@
 
-"""Test SHL game schedule with confirmed UUIDs."""
+"""Inspect SHL game overview and play-by-play endpoints."""
 
 import json
 import requests
 
-URL = "https://www.shl.se/api/sports-v2/game-schedule"
+BASE = "https://www.shl.se/api/gameday"
+
+# Verified game UUID from the SHL schedule response.
+GAME_UUID = "p2qoh7wot5"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -12,26 +15,21 @@ HEADERS = {
     "Referer": "https://www.shl.se/",
 }
 
-SEASONS = {
-    "2024/2025": "qeb-73bZkIm9A",
-    "2025/2026": "xs4m9qupsi",
-    "2026/2027": "ndcf81nlb3",
-}
+ENDPOINTS = [
+    "game-overview",
+    "play-by-play",
+]
 
-for season_name, season_uuid in SEASONS.items():
-    params = {
-        "seasonUuid": season_uuid,
-        "seriesUuid": "qQ9-bb0bzEWUk",
-        "gameTypeUuid": "qQ9-af37Ti40B",
-    }
+for endpoint in ENDPOINTS:
+    url = f"{BASE}/{endpoint}/{GAME_UUID}"
 
     print("\n" + "=" * 70)
-    print("SEASON:", season_name)
+    print("ENDPOINT:", endpoint)
+    print("URL:", url)
 
     try:
         response = requests.get(
-            URL,
-            params=params,
+            url,
             headers=HEADERS,
             timeout=30,
         )
@@ -39,22 +37,22 @@ for season_name, season_uuid in SEASONS.items():
         print("HTTP:", response.status_code)
         response.raise_for_status()
 
-        data = response.json()
-        print("Response type:", type(data).__name__)
+        try:
+            data = response.json()
+            print("Response type:", type(data).__name__)
+            if isinstance(data, dict):
+                print("Top-level keys:", list(data.keys()))
 
-        if isinstance(data, dict):
-            print("Top-level keys:", list(data.keys()))
+            print(json.dumps(
+                data,
+                ensure_ascii=False,
+                indent=2,
+            )[:15000])
 
-        if isinstance(data, list):
-            print("Number of entries:", len(data))
-
-        print(json.dumps(
-            data,
-            ensure_ascii=False,
-            indent=2,
-        )[:12000])
+        except ValueError:
+            print(response.text[:15000])
 
     except Exception as error:
         print("ERROR:", repr(error))
 
-print("\nSchedule tests finished.")
+print("\nEndpoint inspection finished.")
