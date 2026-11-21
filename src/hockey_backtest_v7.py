@@ -68,7 +68,13 @@ def backtest(matches):
         raise ValueError(f"Missing columns: {sorted(missing)}")
 
     data = matches.copy()
-    data["date"] = pd.to_datetime(data["date"], errors="raise")
+
+    # Accept both date-only values and timestamps with kickoff times.
+    data["date"] = pd.to_datetime(
+        data["date"],
+        errors="raise",
+        format="mixed",
+    )
 
     for column in ("reg_home_goals", "reg_away_goals"):
         data[column] = pd.to_numeric(data[column], errors="raise")
@@ -80,6 +86,11 @@ def backtest(matches):
 
     if (data["home_team"] == data["away_team"]).any():
         raise ValueError("A team cannot play against itself")
+
+    # Keep the original timestamp, but group by calendar day.
+    # This prevents earlier games on the same day from leaking
+    # results into predictions for later games that day.
+    data["match_day"] = data["date"].dt.normalize()
 
     data = data.sort_values(
         ["date", "league", "home_team", "away_team"],
@@ -98,16 +109,16 @@ def backtest(matches):
 
     output = []
 
-    for date, day in data.groupby("date", sort=True):
+    for match_day, day in data.groupby("match_day", sort=True):
         day_records = []
 
-        # All matches on the date are predicted before any results
-        # from that date are added to any league's training history.
+        # All matches across all leagues on this calendar day
+        # are predicted before any results from that day are used.
         for row in day.itertuples(index=False):
             league = str(row.league)
             home = str(row.home_team)
             away = str(row.away_team)
-            season = season_key(date)
+            season = season_key(match_day)
 
             if league not in feature_rows:
                 feature_rows[league] = []
@@ -128,8 +139,8 @@ def backtest(matches):
                         away_targets[league],
                     )
 
-            baseline.prepare_date(league, date)
-            features = state.make_features(row, date)
+            baseline.prepare_date(league, match_day)
+            features = state.make_features(row, match_day)
 
             base_home, base_away = baseline.expected_goals(
                 league, home, away
@@ -176,7 +187,7 @@ def backtest(matches):
                 "home_target": hg,
                 "away_target": ag,
                 "output": {
-                    "date": date,
+                    "date": row.date,
                     "league": league,
                     "home_team": home,
                     "away_team": away,
@@ -195,13 +206,13 @@ def backtest(matches):
                 },
             })
 
-        # Update histories only after every match of this date
+        # Update histories only after every match of the calendar day
         # has received its prediction.
         for record in day_records:
             row = record["row"]
             league = str(row.league)
 
-            state.update(row, date)
+            state.update(row, match_day)
 
             baseline.update(
                 league,
