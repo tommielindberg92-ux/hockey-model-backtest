@@ -1,5 +1,5 @@
 
-"""V7: predict regulation goals first, then derive 1X2 probabilities."""
+"""V7: league-specific goal models with chronological regulation-time backtesting."""
 
 from __future__ import annotations
 
@@ -34,21 +34,28 @@ def train_goal_models(features, home_goals, away_goals):
         depth=6,
         learning_rate=0.03,
         l2_leaf_reg=6,
-        random_seed=71,
         verbose=False,
         allow_writing_files=False,
         thread_count=2,
     )
 
-    home_model = CatBoostRegressor(**common)
-    away_model = CatBoostRegressor(**{**common, "random_seed": 72})
+    home_model = CatBoostRegressor(
+        **common,
+        random_seed=71,
+    )
+    away_model = CatBoostRegressor(
+        **common,
+        random_seed=72,
+    )
 
     home_model.fit(
-        x, np.asarray(home_goals, dtype=float),
+        x,
+        np.asarray(home_goals, dtype=float),
         cat_features=CATEGORICAL,
     )
     away_model.fit(
-        x, np.asarray(away_goals, dtype=float),
+        x,
+        np.asarray(away_goals, dtype=float),
         cat_features=CATEGORICAL,
     )
 
@@ -82,39 +89,44 @@ def backtest(matches):
     state = FeatureState()
     baseline = TimeWeightedModel()
 
-    feature_rows = []
-    home_targets = []
-    away_targets = []
+    # Each league has its own training history and models.
+    feature_rows = {}
+    home_targets = {}
+    away_targets = {}
+    current_season = {}
+    league_models = {}
+
     output = []
 
-    home_model = None
-    away_model = None
-    current_season = None
-
     for date, day in data.groupby("date", sort=True):
-        season = season_key(date)
-
-        # Train only on matches completed before this season.
-        if season != current_season:
-            current_season = season
-            home_model = None
-            away_model = None
-
-            if len(feature_rows) >= 500:
-                home_model, away_model = train_goal_models(
-                    feature_rows,
-                    home_targets,
-                    away_targets,
-                )
-
         day_records = []
 
-        # Every match on this date is predicted before any result
-        # from the same date is added to the model state.
+        # All matches on the date are predicted before any results
+        # from that date are added to any league's training history.
         for row in day.itertuples(index=False):
             league = str(row.league)
             home = str(row.home_team)
             away = str(row.away_team)
+            season = season_key(date)
+
+            if league not in feature_rows:
+                feature_rows[league] = []
+                home_targets[league] = []
+                away_targets[league] = []
+                current_season[league] = None
+                league_models[league] = None
+
+            # Retrain only this league's models at its season boundary.
+            if season != current_season[league]:
+                current_season[league] = season
+                league_models[league] = None
+
+                if len(feature_rows[league]) >= 500:
+                    league_models[league] = train_goal_models(
+                        feature_rows[league],
+                        home_targets[league],
+                        away_targets[league],
+                    )
 
             baseline.prepare_date(league, date)
             features = state.make_features(row, date)
@@ -123,14 +135,15 @@ def backtest(matches):
                 league, home, away
             )
 
-            if home_model is not None:
+            models = league_models[league]
+
+            if models is not None:
+                home_model, away_model = models
                 x = pd.DataFrame([features])
 
                 ml_home = float(home_model.predict(x)[0])
                 ml_away = float(away_model.predict(x)[0])
 
-                # Blend learned goal estimates with the dynamic
-                # V3 goal model to reduce extreme predictions.
                 expected_home = 0.70 * ml_home + 0.30 * base_home
                 expected_away = 0.70 * ml_away + 0.30 * base_away
             else:
@@ -182,26 +195,67 @@ def backtest(matches):
                 },
             })
 
-        # Update only after all predictions for the date are complete.
+        # Update histories only after every match of this date
+        # has received its prediction.
         for record in day_records:
             row = record["row"]
+            league = str(row.league)
 
             state.update(row, date)
 
             baseline.update(
-                str(row.league),
+                league,
                 str(row.home_team),
                 str(row.away_team),
                 int(row.reg_home_goals),
                 int(row.reg_away_goals),
             )
 
-            feature_rows.append(record["features"])
-            home_targets.append(record["home_target"])
-            away_targets.append(record["away_target"])
+            feature_rows[league].append(record["features"])
+            home_targets[league].append(record["home_target"])
+            away_targets[league].append(record["away_target"])
+
             output.append(record["output"])
 
     return pd.DataFrame(output)
+
+
+def print_metrics(results, title):
+    print(f"\n--- {title} ---")
+    print(f"Matcher: {len(results)}")
+
+    if results.empty:
+        print("Inga matcher att utvärdera.")
+        return
+
+    print(f"Träffsäkerhet: {results.correct.mean():.4%}")
+    print(f"Brier score: {results.brier.mean():.5f}")
+    print(f"Log loss: {results.log_loss.mean():.5f}")
+
+    print("\nModellens val:")
+    print(
+        results["predicted"]
+        .value_counts()
+        .reindex(["1", "X", "2"], fill_value=0)
+    )
+
+    print("\nVerkliga utfall:")
+    print(
+        results["actual"]
+        .value_counts(normalize=True)
+        .reindex(["1", "X", "2"])
+        .round(4)
+    )
+
+    print("\nGenomsnittliga sannolikheter:")
+    print(results[["p1", "px", "p2"]].mean().round(4))
+
+    print("\nGenomsnittligt förväntade mål:")
+    print(
+        results[
+            ["expected_home_goals", "expected_away_goals"]
+        ].mean().round(3)
+    )
 
 
 def main():
@@ -213,36 +267,12 @@ def main():
     results = backtest(pd.read_csv(args.input))
     results.to_csv(args.output, index=False)
 
-    print(f"Matcher: {len(results)}")
+    print_metrics(results, "SAMTLIGA LIGOR")
 
-    if len(results):
-        print(f"Träffsäkerhet: {results.correct.mean():.4%}")
-        print(f"Brier score: {results.brier.mean():.5f}")
-        print(f"Log loss: {results.log_loss.mean():.5f}")
-
-        print("\nModellens val:")
-        print(
-            results["predicted"]
-            .value_counts()
-            .reindex(["1", "X", "2"], fill_value=0)
-        )
-
-        print("\nVerkliga utfall:")
-        print(
-            results["actual"]
-            .value_counts(normalize=True)
-            .reindex(["1", "X", "2"])
-            .round(4)
-        )
-
-        print("\nGenomsnittliga sannolikheter:")
-        print(results[["p1", "px", "p2"]].mean().round(4))
-
-        print("\nGenomsnittligt förväntade mål:")
-        print(
-            results[
-                ["expected_home_goals", "expected_away_goals"]
-            ].mean().round(3)
+    for league in sorted(results["league"].unique()):
+        print_metrics(
+            results[results["league"] == league],
+            league,
         )
 
 
