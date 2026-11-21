@@ -7,7 +7,7 @@ on:
       game_date:
         description: "NHL match date (YYYY-MM-DD)"
         required: true
-        default: "2026-11-20"
+        default: "2026-11-19"
 
 jobs:
   verify:
