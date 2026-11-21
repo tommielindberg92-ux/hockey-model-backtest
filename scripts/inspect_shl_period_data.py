@@ -1,5 +1,5 @@
 
-"""Inspect SHL play-by-play data from a real overtime game."""
+"""Inspect SHL play-by-play data from a real overtime-decided game."""
 
 import requests
 
@@ -14,7 +14,6 @@ HEADERS = {
     "Referer": "https://www.shl.se/",
 }
 
-# This is the schedule season UUID, not the statistics UUID.
 PARAMS = {
     "seasonUuid": "qeb-73bZkIm9A",
     "seriesUuid": "qQ9-bb0bzEWUk",
@@ -30,20 +29,18 @@ response = requests.get(
 print("Schedule HTTP status:", response.status_code)
 response.raise_for_status()
 
-data = response.json()
-games = data.get("gameInfo", [])
-
-print("Games in schedule:", len(games))
+games = response.json().get("gameInfo", [])
 
 overtime_games = [
     game for game in games
-    if game.get("overtime") or game.get("shootout")
+    if game.get("overtime") and not game.get("shootout")
 ]
 
-print("Overtime/shootout games:", len(overtime_games))
+print("Games in schedule:", len(games))
+print("Overtime games without shootout:", len(overtime_games))
 
 if not overtime_games:
-    print("No overtime games found.")
+    print("No overtime-decided games found.")
     raise SystemExit(0)
 
 game = overtime_games[0]
@@ -70,30 +67,43 @@ print("\nPlay-by-play HTTP status:", response.status_code)
 response.raise_for_status()
 
 events = response.json()
-
 print("Play-by-play event count:", len(events))
 
-if events:
-    print("Event fields:", list(events[0].keys()))
+period_three_events = [
+    event for event in events
+    if event.get("period") == 3
+    and event.get("time") == "20:00"
+    and event.get("homeTeam", {}).get("score") is not None
+    and event.get("awayTeam", {}).get("score") is not None
+]
 
-print("\nEvents from period 3 onward:")
+print("\nPeriod 3, time 20:00 snapshots:")
+
+for event in period_three_events:
+    print({
+        "time": event.get("time"),
+        "state": event.get("gameState"),
+        "revision": event.get("revision"),
+        "home_score": event.get("homeTeam", {}).get("score"),
+        "away_score": event.get("awayTeam", {}).get("score"),
+        "homeGoals": event.get("homeGoals"),
+        "awayGoals": event.get("awayGoals"),
+        "type": event.get("type"),
+    })
+
+print("\nEvents in period 4:")
 
 for event in events:
-    period = event.get("period", 0)
-
-    if period >= 3:
-        home_event = event.get("homeTeam", {})
-        away_event = event.get("awayTeam", {})
-
+    if event.get("period") == 4:
         print({
-            "period": period,
             "time": event.get("time"),
             "state": event.get("gameState"),
             "revision": event.get("revision"),
-            "home_score": home_event.get("score"),
-            "away_score": away_event.get("score"),
-            "event_type": event.get("eventType"),
-            "description": event.get("description"),
+            "home_score": event.get("homeTeam", {}).get("score"),
+            "away_score": event.get("awayTeam", {}).get("score"),
+            "homeGoals": event.get("homeGoals"),
+            "awayGoals": event.get("awayGoals"),
+            "type": event.get("type"),
         })
 
 print("\nOvertime inspection finished.")
