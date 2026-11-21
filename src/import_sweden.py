@@ -4,8 +4,8 @@
 import argparse
 import csv
 import json
+import time
 from pathlib import Path
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 BASE_URL = "https://hockeyallsvenskan.se/api/all-time-games-stats"
@@ -18,9 +18,9 @@ COLUMNS = [
 
 
 def get_games(season, phase):
-    # API:ets säsongsparameter använder startåret.
-    params = urlencode({
-        "season": season - 1,
+    """Hämta en säsongs matcher via API:ets POST-anrop."""
+    body = {
+        "league": "HA",
         "phase": phase,
         "team_side": "all",
         "team": "all",
@@ -28,11 +28,22 @@ def get_games(season, phase):
         "all_results": "all",
         "game_status": "played",
         "decided_in": "all",
-    })
+        "categories": "all",
+        "page": 1,
+        "page_size": 1000,
+        # API:et använder säsongens startår.
+        "season": str(season - 1),
+    }
 
     request = Request(
-        f"{BASE_URL}?{params}",
-        headers={"User-Agent": "hockey-model-backtest/1.0"},
+        BASE_URL,
+        data=json.dumps(body).encode("utf-8"),
+        headers={
+            "User-Agent": "hockey-model-backtest/1.0",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+        method="POST",
     )
 
     with urlopen(request, timeout=30) as response:
@@ -42,7 +53,7 @@ def get_games(season, phase):
         return payload
 
     if isinstance(payload, dict):
-        for key in ("data", "games", "results", "items"):
+        for key in ("data", "games", "results"):
             if isinstance(payload.get(key), list):
                 return payload[key]
 
@@ -50,29 +61,34 @@ def get_games(season, phase):
 
 
 def parse_period_scores(value):
+    """Summera endast period 1–3. Ignorera eventuell OT."""
     if isinstance(value, str):
         value = json.loads(value)
 
     if not isinstance(value, list) or len(value) < 3:
-        raise ValueError("Saknade periodresultat för matchen.")
+        raise ValueError("Saknade periodresultat.")
 
     home_goals = 0
     away_goals = 0
 
     for period in value[:3]:
-        if isinstance(period, dict):
-            home = period.get("Home", period.get("home"))
-            away = period.get("Away", period.get("away"))
-        elif isinstance(period, (list, tuple)) and len(period) >= 2:
-            home, away = period[0], period[1]
-        else:
+        if not isinstance(period, dict):
             raise ValueError("Ogiltigt format på periodresultat.")
+
+        home = period.get("Home")
+        away = period.get("Away")
 
         if home is None or away is None:
             raise ValueError("Saknade mål i periodresultatet.")
 
-        home_goals += int(home)
-        away_goals += int(away)
+        home = int(home)
+        away = int(away)
+
+        if home < 0 or away < 0:
+            raise ValueError("Negativt antal mål i periodresultatet.")
+
+        home_goals += home
+        away_goals += away
 
     return home_goals, away_goals
 
@@ -84,33 +100,47 @@ def import_season(season, phase, output_file):
     for game in games:
         decided_in = str(game.get("decided_in", "")).upper()
 
+        # Walkover och ofullständiga matcher tas inte med.
         if decided_in not in {"FT", "OT", "SO"}:
             continue
 
         try:
-            home_goals, away_goals = parse_period_scores(
-                game.get("period_scores")
+            period_scores = game.get(
+                "period_scores", game.get("PeriodScores")
             )
+            home_goals, away_goals = parse_period_scores(period_scores)
 
+            # FT ska ha en vinnare efter 60 minuter.
             if decided_in == "FT" and home_goals == away_goals:
                 raise ValueError("FT-match oavgjord efter 60 minuter.")
 
+            # OT och SO ska vara oavgjorda efter 60 minuter.
             if decided_in in {"OT", "SO"} and home_goals != away_goals:
                 raise ValueError("OT/SO-match ej oavgjord efter 60 minuter.")
 
-            row = {
-                "date": game["date"],
+            date_value = game.get("date", game.get("Date"))
+            home_team = game.get(
+                "home_team_code", game.get("HomeTeam")
+            )
+            away_team = game.get(
+                "away_team_code", game.get("AwayTeam")
+            )
+
+            if not all((date_value, home_team, away_team)):
+                raise ValueError("Matchen saknar datum eller lag.")
+
+            imported.append({
+                "date": str(date_value),
                 "league": "HockeyAllsvenskan",
-                "home_team": game["home_team_code"],
-                "away_team": game["away_team_code"],
+                "home_team": str(home_team),
+                "away_team": str(away_team),
                 "reg_home_goals": home_goals,
                 "reg_away_goals": away_goals,
                 "decided_in": decided_in,
                 "source": SOURCE,
-            }
-            imported.append(row)
+            })
 
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             print(f"VARNING: match hoppades över: {exc}")
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
@@ -145,12 +175,21 @@ def main():
     parser = argparse.ArgumentParser(
         description="Importera HockeyAllsvenskan efter 60 minuter."
     )
-    parser.add_argument("--season", type=int, required=True,
-                        help="Säsongens slutår, exempelvis 2026")
-    parser.add_argument("--phase", default="HA",
-                        choices=["HA", "HAPlayoff", "HAkval"])
-    parser.add_argument("--output", default="data/ha_matches.csv")
+    parser.add_argument(
+        "--season", type=int, required=True,
+        help="Säsongens slutår, exempelvis 2026"
+    )
+    parser.add_argument(
+        "--phase", default="HA",
+        choices=["HA", "HAPlayoff", "HAkval"]
+    )
+    parser.add_argument(
+        "--output", default="data/ha_matches.csv"
+    )
     args = parser.parse_args()
+
+    if args.season < 2006:
+        parser.error("Historisk data finns från säsongen 2005/06.")
 
     import_season(args.season, args.phase, Path(args.output))
 
