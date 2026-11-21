@@ -1,0 +1,32 @@
+name: Evaluate HockeyAllsvenskan v3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run v3 backtest
+        run: |
+          python -m src.hockey_backtest_v3 \
+            --input data/ha_matches.csv \
+            --output v3_predictions.csv
+
+      - name: Upload predictions
+        uses: actions/upload-artifact@v4
+        with:
+          name: hockey-allsvenskan-v3-predictions
+          path: v3_predictions.csv
