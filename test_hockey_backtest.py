@@ -101,7 +101,7 @@ def test_nhl_regulation_result_excludes_overtime(monkeypatch):
 
     monkeypatch.setattr("src.import_nhl.get_json", fake_get_json)
 
-    home, away, decided = get_regulation_result(123, 1, 2)
+    home, away, decided = get_regulation_result(123, 1, 2, "OT")
 
     assert home == 1
     assert away == 1
