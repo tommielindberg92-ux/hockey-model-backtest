@@ -1,5 +1,5 @@
 
-"""Validate regulation scores from SHL play-by-play in overtime games."""
+"""Validate regulation scores for every SHL overtime game in 2024/25."""
 
 import requests
 
@@ -18,8 +18,6 @@ PARAMS = {
     "seriesUuid": "qQ9-bb0bzEWUk",
     "gameTypeUuid": "qQ9-af37Ti40B",
 }
-
-MAX_GAMES = 10
 
 
 def event_time_seconds(event):
@@ -44,7 +42,10 @@ def score_from_event(event):
     if home_score is None or away_score is None:
         return None
 
-    return int(home_score), int(away_score)
+    try:
+        return int(home_score), int(away_score)
+    except (TypeError, ValueError):
+        return None
 
 
 def main():
@@ -65,11 +66,10 @@ def main():
 
     print("Games in schedule:", len(games))
     print("Overtime games without shootout:", len(overtime_games))
-    print("Inspecting:", min(MAX_GAMES, len(overtime_games)))
 
     results = []
 
-    for index, game in enumerate(overtime_games[:MAX_GAMES], start=1):
+    for index, game in enumerate(overtime_games, start=1):
         game_uuid = game.get("uuid")
         home = game.get("homeTeamInfo") or {}
         away = game.get("awayTeamInfo") or {}
@@ -77,10 +77,12 @@ def main():
         home_name = (home.get("names") or {}).get("long", "Unknown")
         away_name = (away.get("names") or {}).get("long", "Unknown")
 
-        print(f"\n[{index}/{min(MAX_GAMES, len(overtime_games))}] "
+        final_score = (int(home["score"]), int(away["score"]))
+
+        print(f"\n[{index}/{len(overtime_games)}] "
               f"{home_name} - {away_name}")
         print("Date:", game.get("startDateTime"))
-        print("Final score:", home.get("score"), "-", away.get("score"))
+        print("Final score:", final_score[0], "-", final_score[1])
 
         try:
             response = requests.get(
@@ -88,11 +90,10 @@ def main():
                 headers=HEADERS,
                 timeout=30,
             )
-            print("Play-by-play HTTP status:", response.status_code)
             response.raise_for_status()
             events = response.json()
         except (requests.RequestException, ValueError) as error:
-            print("ERROR fetching events:", error)
+            print("FETCH ERROR:", error)
             results.append({
                 "uuid": game_uuid,
                 "status": "FETCH_ERROR",
@@ -123,42 +124,52 @@ def main():
         )
 
         regulation_score = score_from_event(latest_event)
-        final_score = (
-            int(home["score"]),
-            int(away["score"]),
-        )
+        differs = regulation_score != final_score
 
         print("Latest period 3 event:")
         print("  Time:", latest_event.get("time"))
         print("  Type:", latest_event.get("type"))
         print("  Revision:", latest_event.get("revision"))
-        print("  Regulation score:", regulation_score[0], "-", regulation_score[1])
+        print("  Regulation score:",
+              regulation_score[0], "-", regulation_score[1])
         print("  Final score:", final_score[0], "-", final_score[1])
-
-        differs = regulation_score != final_score
-        print("Differs from final score:", differs)
+        print("  Differs:", differs)
 
         results.append({
             "uuid": game_uuid,
+            "date": game.get("startDateTime"),
+            "home": home_name,
+            "away": away_name,
             "status": "OK",
             "regulation_score": regulation_score,
             "final_score": final_score,
             "differs": differs,
-            "latest_period_three_time": latest_event.get("time"),
+            "time": latest_event.get("time"),
+            "revision": latest_event.get("revision"),
         })
 
-    print("\n========== SUMMARY ==========")
     successful = [item for item in results if item["status"] == "OK"]
     missing = [item for item in results if item["status"] != "OK"]
     differing = [item for item in successful if item["differs"]]
+    identical = [item for item in successful if not item["differs"]]
 
+    print("\n========== FINAL SUMMARY ==========")
+    print("Overtime games expected:", len(overtime_games))
     print("Games inspected:", len(results))
-    print("Successful regulation score reads:", len(successful))
-    print("Missing/error:", len(missing))
-    print("Regulation score differs from final:", len(differing))
+    print("Successful score reads:", len(successful))
+    print("Missing/errors:", len(missing))
+    print("Regulation differs from final:", len(differing))
+    print("Regulation equals final:", len(identical))
 
-    for item in missing:
-        print("PROBLEM:", item)
+    if missing:
+        print("\nPROBLEMS:")
+        for item in missing:
+            print(item)
+
+    if identical:
+        print("\nREVIEW: Regulation score equals final score:")
+        for item in identical:
+            print(item)
 
     print("\nValidation finished.")
 
