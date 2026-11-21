@@ -1,10 +1,9 @@
 
-"""Inspect the final regulation events and overtime in an SHL game."""
+"""Validate regulation scores from SHL play-by-play in overtime games."""
 
 import requests
 
 BASE = "https://www.shl.se/api"
-
 SCHEDULE_URL = f"{BASE}/sports-v2/game-schedule"
 PLAY_BY_PLAY_URL = f"{BASE}/gameday/play-by-play"
 
@@ -20,6 +19,8 @@ PARAMS = {
     "gameTypeUuid": "qQ9-af37Ti40B",
 }
 
+MAX_GAMES = 10
+
 
 def event_time_seconds(event):
     value = event.get("time")
@@ -33,91 +34,134 @@ def event_time_seconds(event):
         return -1
 
 
-def print_event(event):
-    print({
-        "period": event.get("period"),
-        "time": event.get("time"),
-        "state": event.get("gameState"),
-        "revision": event.get("revision"),
-        "home_score": event.get("homeTeam", {}).get("score"),
-        "away_score": event.get("awayTeam", {}).get("score"),
-        "homeGoals": event.get("homeGoals"),
-        "awayGoals": event.get("awayGoals"),
-        "type": event.get("type"),
-    })
+def score_from_event(event):
+    home = event.get("homeTeam") or {}
+    away = event.get("awayTeam") or {}
+
+    home_score = home.get("score")
+    away_score = away.get("score")
+
+    if home_score is None or away_score is None:
+        return None
+
+    return int(home_score), int(away_score)
 
 
-response = requests.get(
-    SCHEDULE_URL,
-    params=PARAMS,
-    headers=HEADERS,
-    timeout=30,
-)
-print("Schedule HTTP status:", response.status_code)
-response.raise_for_status()
+def main():
+    response = requests.get(
+        SCHEDULE_URL,
+        params=PARAMS,
+        headers=HEADERS,
+        timeout=30,
+    )
+    print("Schedule HTTP status:", response.status_code)
+    response.raise_for_status()
 
-games = response.json().get("gameInfo", [])
+    games = response.json().get("gameInfo", [])
+    overtime_games = [
+        game for game in games
+        if game.get("overtime") and not game.get("shootout")
+    ]
 
-overtime_games = [
-    game for game in games
-    if game.get("overtime") and not game.get("shootout")
-]
+    print("Games in schedule:", len(games))
+    print("Overtime games without shootout:", len(overtime_games))
+    print("Inspecting:", min(MAX_GAMES, len(overtime_games)))
 
-print("Games in schedule:", len(games))
-print("Overtime games without shootout:", len(overtime_games))
+    results = []
 
-if not overtime_games:
-    print("No overtime-decided games found.")
-    raise SystemExit(0)
+    for index, game in enumerate(overtime_games[:MAX_GAMES], start=1):
+        game_uuid = game.get("uuid")
+        home = game.get("homeTeamInfo") or {}
+        away = game.get("awayTeamInfo") or {}
 
-game = overtime_games[0]
-game_uuid = game["uuid"]
+        home_name = (home.get("names") or {}).get("long", "Unknown")
+        away_name = (away.get("names") or {}).get("long", "Unknown")
 
-home = game.get("homeTeamInfo", {})
-away = game.get("awayTeamInfo", {})
+        print(f"\n[{index}/{min(MAX_GAMES, len(overtime_games))}] "
+              f"{home_name} - {away_name}")
+        print("Date:", game.get("startDateTime"))
+        print("Final score:", home.get("score"), "-", away.get("score"))
 
-print("\nSelected game:")
-print("UUID:", game_uuid)
-print("Date:", game.get("startDateTime"))
-print("Home:", home.get("names", {}).get("long"))
-print("Away:", away.get("names", {}).get("long"))
-print("Final score:", home.get("score"), "-", away.get("score"))
-print("Overtime:", game.get("overtime"))
-print("Shootout:", game.get("shootout"))
+        try:
+            response = requests.get(
+                f"{PLAY_BY_PLAY_URL}/{game_uuid}",
+                headers=HEADERS,
+                timeout=30,
+            )
+            print("Play-by-play HTTP status:", response.status_code)
+            response.raise_for_status()
+            events = response.json()
+        except (requests.RequestException, ValueError) as error:
+            print("ERROR fetching events:", error)
+            results.append({
+                "uuid": game_uuid,
+                "status": "FETCH_ERROR",
+            })
+            continue
 
-response = requests.get(
-    f"{PLAY_BY_PLAY_URL}/{game_uuid}",
-    headers=HEADERS,
-    timeout=30,
-)
-print("\nPlay-by-play HTTP status:", response.status_code)
-response.raise_for_status()
+        period_three = [
+            event for event in events
+            if event.get("period") == 3
+            and event_time_seconds(event) >= 0
+            and score_from_event(event) is not None
+        ]
 
-events = response.json()
-print("Play-by-play event count:", len(events))
+        if not period_three:
+            print("REGULATION SCORE: NOT FOUND")
+            results.append({
+                "uuid": game_uuid,
+                "status": "NO_PERIOD_THREE_SCORE",
+            })
+            continue
 
-period_three = [
-    event for event in events
-    if event.get("period") == 3
-]
+        latest_event = max(
+            period_three,
+            key=lambda event: (
+                event_time_seconds(event),
+                event.get("revision", 0),
+            ),
+        )
 
-period_three.sort(key=event_time_seconds, reverse=True)
+        regulation_score = score_from_event(latest_event)
+        final_score = (
+            int(home["score"]),
+            int(away["score"]),
+        )
 
-print("\nLatest 20 events in period 3:")
+        print("Latest period 3 event:")
+        print("  Time:", latest_event.get("time"))
+        print("  Type:", latest_event.get("type"))
+        print("  Revision:", latest_event.get("revision"))
+        print("  Regulation score:", regulation_score[0], "-", regulation_score[1])
+        print("  Final score:", final_score[0], "-", final_score[1])
 
-for event in period_three[:20]:
-    print_event(event)
+        differs = regulation_score != final_score
+        print("Differs from final score:", differs)
 
-period_four = [
-    event for event in events
-    if event.get("period") == 4
-]
+        results.append({
+            "uuid": game_uuid,
+            "status": "OK",
+            "regulation_score": regulation_score,
+            "final_score": final_score,
+            "differs": differs,
+            "latest_period_three_time": latest_event.get("time"),
+        })
 
-period_four.sort(key=event_time_seconds, reverse=True)
+    print("\n========== SUMMARY ==========")
+    successful = [item for item in results if item["status"] == "OK"]
+    missing = [item for item in results if item["status"] != "OK"]
+    differing = [item for item in successful if item["differs"]]
 
-print("\nLatest 10 events in period 4:")
+    print("Games inspected:", len(results))
+    print("Successful regulation score reads:", len(successful))
+    print("Missing/error:", len(missing))
+    print("Regulation score differs from final:", len(differing))
 
-for event in period_four[:10]:
-    print_event(event)
+    for item in missing:
+        print("PROBLEM:", item)
 
-print("\nRegulation and overtime inspection finished.")
+    print("\nValidation finished.")
+
+
+if __name__ == "__main__":
+    main()
