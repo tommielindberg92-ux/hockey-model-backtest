@@ -1,10 +1,11 @@
 
-"""V4: CatBoost + V3 ensemble for regulation-time hockey predictions."""
+"""V4: CatBoost + V3 ensemble, leakage-safe chronological backtest."""
 
 from __future__ import annotations
 
 import argparse
 import math
+
 import numpy as np
 import pandas as pd
 from catboost import CatBoostClassifier
@@ -17,31 +18,37 @@ REQUIRED = {
 }
 
 CATEGORICAL = ["league", "home_team", "away_team"]
-LABELS = {"1": 0, "X": 1, "2": 2}
+
+
+def season_key(date):
+    return date.year if date.month >= 8 else date.year - 1
 
 
 class FeatureState:
+    """Stores only information available before each match."""
+
     def __init__(self):
         self.history = {}
         self.elo = {}
-        self.last_date = {}
-        self.global_home = []
-        self.global_draw = []
+        self.home_rates = {}
+        self.draw_rates = {}
 
-    def rating(self, team):
-        return self.elo.get(team, 1500.0)
+    def rating(self, league, team):
+        return self.elo.get((league, team), 1500.0)
 
-    def team_features(self, team, date, venue):
-        games = self.history.get(team, [])
+    def team_features(self, league, team, date, side, venue):
+        games = self.history.get((league, team), [])
+
         selected = [
-            g for g in games
-            if venue == "all" or g["venue"] == venue
+            game for game in games
+            if venue == "all" or game["venue"] == venue
         ]
 
         result = {}
+
         for window in (5, 10, 20):
             recent = selected[-window:]
-            prefix = f"{team}_{venue}_{window}"
+            prefix = f"{side}_{venue}_{window}"
 
             if recent:
                 result[f"{prefix}_points"] = (
@@ -65,81 +72,105 @@ class FeatureState:
 
         if games:
             days = max(0, (date - games[-1]["date"]).days)
-            result[f"{team}_rest_days"] = min(days, 30)
-            result[f"{team}_games_7d"] = sum(
-                (date - g["date"]).days <= 7 for g in games
+            result[f"{side}_rest_days"] = min(days, 30)
+            result[f"{side}_games_7d"] = sum(
+                0 <= (date - g["date"]).days <= 7 for g in games
             )
-            result[f"{team}_games_14d"] = sum(
-                (date - g["date"]).days <= 14 for g in games
+            result[f"{side}_games_14d"] = sum(
+                0 <= (date - g["date"]).days <= 14 for g in games
             )
         else:
-            result[f"{team}_rest_days"] = 7
-            result[f"{team}_games_7d"] = 0
-            result[f"{team}_games_14d"] = 0
+            result[f"{side}_rest_days"] = 7
+            result[f"{side}_games_7d"] = 0
+            result[f"{side}_games_14d"] = 0
 
-        result[f"{team}_elo"] = self.rating(team)
+        result[f"{side}_elo"] = self.rating(league, team)
         return result
 
     def make_features(self, row, date):
+        league = str(row.league)
         home = str(row.home_team)
         away = str(row.away_team)
-        league = str(row.league)
+
+        home_elo = self.rating(league, home)
+        away_elo = self.rating(league, away)
 
         features = {
             "league": league,
             "home_team": home,
             "away_team": away,
-            "elo_diff": self.rating(home) - self.rating(away),
-            "elo_home": self.rating(home),
-            "elo_away": self.rating(away),
-            "previous_home_rate": (
-                np.mean(self.global_home) if self.global_home else 0.47
+            "elo_diff": home_elo - away_elo,
+            "home_elo": home_elo,
+            "away_elo": away_elo,
+            "previous_home_rate": self.home_rates.get(
+                league, 0.47
             ),
-            "previous_draw_rate": (
-                np.mean(self.global_draw) if self.global_draw else 0.21
+            "previous_draw_rate": self.draw_rates.get(
+                league, 0.21
             ),
         }
 
-        features.update(self.team_features(home, date, "all"))
-        features.update(self.team_features(away, date, "all"))
-        features.update(self.team_features(home, date, "home"))
-        features.update(self.team_features(away, date, "away"))
+        features.update(
+            self.team_features(league, home, date, "home", "all")
+        )
+        features.update(
+            self.team_features(league, away, date, "away", "all")
+        )
+        features.update(
+            self.team_features(league, home, date, "home", "home")
+        )
+        features.update(
+            self.team_features(league, away, date, "away", "away")
+        )
 
         return features
 
     def update(self, row, date):
+        league = str(row.league)
         home = str(row.home_team)
         away = str(row.away_team)
         hg = int(row.reg_home_goals)
         ag = int(row.reg_away_goals)
 
-        rh = self.rating(home)
-        ra = self.rating(away)
-        expected = 1 / (1 + 10 ** ((ra - rh - 55) / 400))
+        rh = self.rating(league, home)
+        ra = self.rating(league, away)
+
+        expected = 1 / (
+            1 + 10 ** ((ra - rh - 55) / 400)
+        )
         actual = 1.0 if hg > ag else 0.5 if hg == ag else 0.0
         change = 20 * (actual - expected)
 
-        self.elo[home] = rh + change
-        self.elo[away] = ra - change
+        self.elo[(league, home)] = rh + change
+        self.elo[(league, away)] = ra - change
 
         home_points = 3 if hg > ag else 1 if hg == ag else 0
         away_points = 3 if ag > hg else 1 if hg == ag else 0
 
-        self.history.setdefault(home, []).append({
-            "date": date, "gf": hg, "ga": ag,
-            "points": home_points, "venue": "home",
+        self.history.setdefault((league, home), []).append({
+            "date": date,
+            "gf": hg,
+            "ga": ag,
+            "points": home_points,
+            "venue": "home",
         })
-        self.history.setdefault(away, []).append({
-            "date": date, "gf": ag, "ga": hg,
-            "points": away_points, "venue": "away",
+
+        self.history.setdefault((league, away), []).append({
+            "date": date,
+            "gf": ag,
+            "ga": hg,
+            "points": away_points,
+            "venue": "away",
         })
 
-        self.global_home.append(int(hg > ag))
-        self.global_draw.append(int(hg == ag))
+        home_rates = self.home_rates.setdefault(league, [])
+        draw_rates = self.draw_rates.setdefault(league, [])
 
+        home_rates.append(int(hg > ag))
+        draw_rates.append(int(hg == ag))
 
-def season_key(date):
-    return date.year if date.month >= 8 else date.year - 1
+        self.home_rates[league] = float(np.mean(home_rates))
+        self.draw_rates[league] = float(np.mean(draw_rates))
 
 
 def backtest(matches):
@@ -148,8 +179,26 @@ def backtest(matches):
         raise ValueError(f"Missing columns: {sorted(missing)}")
 
     data = matches.copy()
-    data["date"] = pd.to_datetime(data["date"])
-    data = data.sort_values("date", kind="stable").reset_index(drop=True)
+    data["date"] = pd.to_datetime(data["date"], errors="raise")
+    data["reg_home_goals"] = pd.to_numeric(
+        data["reg_home_goals"], errors="raise"
+    )
+    data["reg_away_goals"] = pd.to_numeric(
+        data["reg_away_goals"], errors="raise"
+    )
+
+    if data[list(REQUIRED)].isna().any().any():
+        raise ValueError("Missing required match values")
+
+    if (data["reg_home_goals"] < 0).any():
+        raise ValueError("Negative home goals")
+    if (data["reg_away_goals"] < 0).any():
+        raise ValueError("Negative away goals")
+
+    data = data.sort_values(
+        ["date", "league", "home_team", "away_team"],
+        kind="stable"
+    ).reset_index(drop=True)
 
     state = FeatureState()
     v3 = TimeWeightedModel()
@@ -157,20 +206,21 @@ def backtest(matches):
     feature_rows = []
     target_rows = []
     output = []
+
     model = None
     current_season = None
 
     for date, day in data.groupby("date", sort=True):
         season = season_key(date)
 
-        # Träna endast på avslutade tidigare säsonger.
+        # Fit only on completed previous seasons.
         if season != current_season:
             current_season = season
             model = None
 
             if len(feature_rows) >= 500:
                 train_x = pd.DataFrame(feature_rows)
-                train_y = np.asarray(target_rows)
+                train_y = np.asarray(target_rows, dtype=int)
 
                 if len(np.unique(train_y)) == 3:
                     model = CatBoostClassifier(
@@ -185,64 +235,82 @@ def backtest(matches):
                         allow_writing_files=False,
                         thread_count=2,
                     )
+
                     model.fit(
                         train_x,
                         train_y,
                         cat_features=CATEGORICAL,
                     )
 
-        day_updates = []
-        day_features = []
+        day_records = []
 
-        # Alla matcher samma datum får prognoser före uppdatering.
+        # Prepare V3 decay and create all predictions before updates.
         for row in day.itertuples(index=False):
-            features = state.make_features(row, date)
-            day_features.append(features)
+            league = str(row.league)
 
-            base_probs = v3.predict(
-                str(row.league),
-                str(row.home_team),
-                str(row.away_team),
+            v3.prepare_date(league, date)
+
+            features = state.make_features(row, date)
+
+            base_probs = np.asarray(
+                v3.predict(
+                    league,
+                    str(row.home_team),
+                    str(row.away_team),
+                ),
+                dtype=float,
             )
 
             if model is not None:
                 x = pd.DataFrame([features])
-                ml_probs = model.predict_proba(x)[0]
+                ml_raw = model.predict_proba(x)[0]
 
-                # Ensemble: CatBoost 65 %, V3 35 %.
-                probs = 0.65 * ml_probs + 0.35 * np.asarray(base_probs)
+                ml_probs = np.zeros(3, dtype=float)
+                for index, class_label in enumerate(model.classes_):
+                    ml_probs[int(class_label)] = ml_raw[index]
+
+                # Initial ensemble weight; later tune on validation only.
+                probs = 0.65 * ml_probs + 0.35 * base_probs
                 probs = probs / probs.sum()
             else:
-                probs = np.asarray(base_probs)
+                probs = base_probs
 
             hg = int(row.reg_home_goals)
             ag = int(row.reg_away_goals)
+
             actual_index = 0 if hg > ag else 1 if hg == ag else 2
             actual = ("1", "X", "2")[actual_index]
 
-            output.append({
-                "date": date,
-                "league": str(row.league),
-                "home_team": str(row.home_team),
-                "away_team": str(row.away_team),
-                "p1": probs[0],
-                "px": probs[1],
-                "p2": probs[2],
-                "actual": actual,
-                "correct": int(np.argmax(probs) == actual_index),
-                "brier": float(np.mean(
-                    (probs - np.eye(3)[actual_index]) ** 2
-                )),
-                "log_loss": float(
-                    -math.log(max(1e-15, probs[actual_index]))
-                ),
+            one_hot = np.eye(3)[actual_index]
+
+            day_records.append({
+                "features": features,
+                "target": actual_index,
+                "output": {
+                    "date": date,
+                    "league": league,
+                    "home_team": str(row.home_team),
+                    "away_team": str(row.away_team),
+                    "p1": float(probs[0]),
+                    "px": float(probs[1]),
+                    "p2": float(probs[2]),
+                    "actual": actual,
+                    "predicted": ("1", "X", "2")[int(np.argmax(probs))],
+                    "correct": int(np.argmax(probs) == actual_index),
+                    "brier": float(np.mean((probs - one_hot) ** 2)),
+                    "log_loss": float(
+                        -math.log(max(1e-15, probs[actual_index]))
+                    ),
+                },
+                "row": row,
             })
 
-            day_updates.append(row)
+        # Update only after every match on this date was predicted.
+        for record in day_records:
+            row = record["row"]
 
-        # Först efter dagens samtliga prognoser uppdateras historiken.
-        for row in day_updates:
             state.update(row, date)
+
             v3.update(
                 str(row.league),
                 str(row.home_team),
@@ -251,13 +319,10 @@ def backtest(matches):
                 int(row.reg_away_goals),
             )
 
-            # Träningsraden blir tillgänglig först efter matchen.
-            feature_rows.append(
-                state.make_features(row, date)
-            )
-            hg = int(row.reg_home_goals)
-            ag = int(row.reg_away_goals)
-            target_rows.append(0 if hg > ag else 1 if hg == ag else 2)
+            # Crucial: save the pre-match feature snapshot.
+            feature_rows.append(record["features"])
+            target_rows.append(record["target"])
+            output.append(record["output"])
 
     return pd.DataFrame(output)
 
@@ -272,17 +337,20 @@ def main():
     results.to_csv(args.output, index=False)
 
     print(f"Matcher: {len(results)}")
-    print(f"Träffsäkerhet: {results.correct.mean():.4%}")
-    print(f"Brier score: {results.brier.mean():.5f}")
-    print(f"Log loss: {results.log_loss.mean():.5f}")
-    print("\nModellens val:")
-    print(
-        results[["p1", "px", "p2"]].idxmax(axis=1)
-        .value_counts()
-        .reindex(["p1", "px", "p2"], fill_value=0)
-    )
-    print("\nGenomsnittliga sannolikheter:")
-    print(results[["p1", "px", "p2"]].mean().round(4))
+
+    if len(results):
+        print(f"Träffsäkerhet: {results.correct.mean():.4%}")
+        print(f"Brier score: {results.brier.mean():.5f}")
+        print(f"Log loss: {results.log_loss.mean():.5f}")
+
+        print("\nModellens val:")
+        print(
+            results["predicted"].value_counts()
+            .reindex(["1", "X", "2"], fill_value=0)
+        )
+
+        print("\nGenomsnittliga sannolikheter:")
+        print(results[["p1", "px", "p2"]].mean().round(4))
 
 
 if __name__ == "__main__":
