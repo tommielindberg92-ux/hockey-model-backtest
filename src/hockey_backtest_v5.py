@@ -1,8 +1,8 @@
 
-"""V5: separat kryssmodell + separat hemma/borta-modell.
+"""V5: separat kryssmodell och hemma/borta-modell.
 
 Alla prognoser avser 1/X/2 efter ordinarie tid.
-Träning sker enbart på tidigare färdiga säsonger.
+Träning sker enbart på tidigare säsonger.
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ def season_key(date):
 
 
 class FeatureState:
-    """Sparar endast information som fanns före matchen."""
+    """Sparar information som var tillgänglig före matchen."""
 
     def __init__(self):
         self.history = {}
@@ -66,8 +66,7 @@ class FeatureState:
                     sum(g["ga"] for g in recent) / len(recent)
                 )
                 result[f"{prefix}_winrate"] = (
-                    sum(g["points"] == 3 for g in recent)
-                    / len(recent)
+                    sum(g["points"] == 3 for g in recent) / len(recent)
                 )
             else:
                 result[f"{prefix}_points"] = 1.0
@@ -173,8 +172,9 @@ class FeatureState:
 
 
 def positive_probability(model, features, positive_class=1):
-    """Hämtar sannolikheten för en bestämd klass."""
-    probabilities = model.predict_proba(pd.DataFrame([features]))[0]
+    probabilities = model.predict_proba(
+        pd.DataFrame([features])
+    )[0]
 
     for index, label in enumerate(model.classes_):
         if int(label) == positive_class:
@@ -184,7 +184,7 @@ def positive_probability(model, features, positive_class=1):
 
 
 def train_models(feature_rows, targets):
-    """Tränar kryssmodellen och hemma/borta-modellen separat."""
+    """Tränar separata modeller för kryss och matchvinnare."""
 
     x = pd.DataFrame(feature_rows)
     y = np.asarray(targets, dtype=int)
@@ -196,12 +196,11 @@ def train_models(feature_rows, targets):
     draw_model = None
     direction_model = None
 
-    if draw_count >= 50 and non_draw_count >= 50:
-        # Balansering hjälper modellen att lära sig kryss.
-        # Sannolikheten korrigeras sedan tillbaka till ursprunglig
-        # klassfördelning innan den används i slutprognosen.
-        draw_weight = non_draw_count / draw_count
+    draw_correction_weight = (
+        non_draw_count / max(1, draw_count)
+    )
 
+    if draw_count >= 50 and non_draw_count >= 50:
         draw_model = CatBoostClassifier(
             loss_function="Logloss",
             eval_metric="Logloss",
@@ -213,7 +212,10 @@ def train_models(feature_rows, targets):
             verbose=False,
             allow_writing_files=False,
             thread_count=2,
-            class_weights=[1.0, float(draw_weight)],
+            class_weights=[
+                1.0,
+                float(draw_correction_weight),
+            ],
         )
 
         draw_model.fit(
@@ -222,7 +224,6 @@ def train_models(feature_rows, targets):
             cat_features=CATEGORICAL,
         )
 
-    # Riktning tränas enbart på matcher som inte slutade oavgjort.
     non_draw_mask = y != 1
     direction_y = (y[non_draw_mask] == 0).astype(int)
 
@@ -249,10 +250,7 @@ def train_models(feature_rows, targets):
             cat_features=CATEGORICAL,
         )
 
-    return draw_model, direction_model, (
-    non_draw_count / max(1, draw_count)
-    if draw_model is not None else 1.0
-)
+    return draw_model, direction_model, draw_correction_weight
 
 
 def backtest(matches):
@@ -295,32 +293,33 @@ def backtest(matches):
 
     draw_model = None
     direction_model = None
+    draw_correction_weight = 1.0
     current_season = None
 
     for date, day in data.groupby("date", sort=True):
         season = season_key(date)
 
-        # Träna bara på matcher från tidigare avslutade säsonger.
         if season != current_season:
             current_season = season
+
             draw_model = None
             direction_model = None
+            draw_correction_weight = 1.0
 
             if len(feature_rows) >= 500:
-                draw_model, direction_model, draw_correction_weight = train_models(
-                    feature_rows,
-                    target_rows,
-                )
+                (
+                    draw_model,
+                    direction_model,
+                    draw_correction_weight,
+                ) = train_models(feature_rows, target_rows)
 
         day_records = []
 
-        # Alla matcher samma datum prognostiseras innan resultaten
-        # från någon av dagens matcher uppdaterar modellen.
+        # Först prognostiseras samtliga matcher för datumet.
         for row in day.itertuples(index=False):
             league = str(row.league)
 
             v3.prepare_date(league, date)
-
             features = state.make_features(row, date)
 
             base_probs = np.asarray(
@@ -333,25 +332,21 @@ def backtest(matches):
             )
 
             base_draw = float(base_probs[1])
+
             base_home_conditional = float(
-                base_probs[0] / max(1e-12, base_probs[0] + base_probs[2])
+                base_probs[0] /
+                max(1e-12, base_probs[0] + base_probs[2])
             )
 
-            # Kryssmodellens balanserade sannolikhet korrigeras
-            # för den ursprungliga andelen kryss i träningsdatan.
             if draw_model is not None:
                 weighted_draw = positive_probability(
-                    draw_model, features, positive_class=1
-                )
-
-                draw_count = sum(target_rows)
-                non_draw_count = len(target_rows) - draw_count
-                correction_weight = (
-                    non_draw_count / max(1, draw_count)
+                    draw_model,
+                    features,
+                    positive_class=1,
                 )
 
                 corrected_draw = weighted_draw / (
-                    correction_weight * (1.0 - weighted_draw)
+                    draw_correction_weight * (1.0 - weighted_draw)
                     + weighted_draw
                 )
 
@@ -365,11 +360,11 @@ def backtest(matches):
 
             p_draw = float(np.clip(p_draw, 0.02, 0.55))
 
-            # Riktning: sannolikheten för hemmaseger givet att
-            # matchen inte slutar oavgjort.
             if direction_model is not None:
                 ml_home_conditional = positive_probability(
-                    direction_model, features, positive_class=1
+                    direction_model,
+                    features,
+                    positive_class=1,
                 )
 
                 p_home_conditional = (
@@ -394,7 +389,9 @@ def backtest(matches):
             hg = int(row.reg_home_goals)
             ag = int(row.reg_away_goals)
 
-            actual_index = 0 if hg > ag else 1 if hg == ag else 2
+            actual_index = (
+                0 if hg > ag else 1 if hg == ag else 2
+            )
             actual = ("1", "X", "2")[actual_index]
             one_hot = np.eye(3)[actual_index]
 
@@ -416,15 +413,19 @@ def backtest(matches):
                     "predicted": ("1", "X", "2")[
                         int(np.argmax(probs))
                     ],
-                    "correct": int(np.argmax(probs) == actual_index),
-                    "brier": float(np.mean((probs - one_hot) ** 2)),
+                    "correct": int(
+                        np.argmax(probs) == actual_index
+                    ),
+                    "brier": float(
+                        np.mean((probs - one_hot) ** 2)
+                    ),
                     "log_loss": float(
                         -math.log(max(1e-15, probs[actual_index]))
                     ),
                 },
             })
 
-        # Uppdatera historiken först när dagens prognoser är klara.
+        # Resultaten från dagens matcher läggs till först efteråt.
         for record in day_records:
             row = record["row"]
 
@@ -469,8 +470,12 @@ def main():
         )
 
         print("\nVerklig utfallsfördelning:")
-        print(results["actual"].value_counts(normalize=True)
-              .reindex(["1", "X", "2"]).round(4))
+        print(
+            results["actual"]
+            .value_counts(normalize=True)
+            .reindex(["1", "X", "2"])
+            .round(4)
+        )
 
         print("\nGenomsnittliga sannolikheter:")
         print(results[["p1", "px", "p2"]].mean().round(4))
