@@ -134,7 +134,7 @@ def test_nhl_regulation_result_counts_three_periods():
     original = src.import_nhl.get_json
     src.import_nhl.get_json = fake_get_json
     try:
-        home, away, decided = get_regulation_result(123, 1, 2)
+        home, away, decided = get_regulation_result(123, 1, 2, "REG")
     finally:
         src.import_nhl.get_json = original
 
