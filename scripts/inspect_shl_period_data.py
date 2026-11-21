@@ -1,3 +1,4 @@
+
 """Inspect SHL play-by-play data from a real overtime game."""
 
 import requests
@@ -13,8 +14,9 @@ HEADERS = {
     "Referer": "https://www.shl.se/",
 }
 
+# This is the schedule season UUID, not the statistics UUID.
 PARAMS = {
-    "seasonUuid": "qeb-73qtP8d19",
+    "seasonUuid": "qeb-73bZkIm9A",
     "seriesUuid": "qQ9-bb0bzEWUk",
     "gameTypeUuid": "qQ9-af37Ti40B",
 }
@@ -25,6 +27,7 @@ response = requests.get(
     headers=HEADERS,
     timeout=30,
 )
+print("Schedule HTTP status:", response.status_code)
 response.raise_for_status()
 
 data = response.json()
@@ -63,11 +66,12 @@ response = requests.get(
     headers=HEADERS,
     timeout=30,
 )
+print("\nPlay-by-play HTTP status:", response.status_code)
 response.raise_for_status()
 
 events = response.json()
 
-print("\nPlay-by-play event count:", len(events))
+print("Play-by-play event count:", len(events))
 
 if events:
     print("Event fields:", list(events[0].keys()))
