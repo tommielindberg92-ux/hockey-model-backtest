@@ -1,13 +1,11 @@
 
-"""Inspect SHL game overview and play-by-play endpoints."""
+"""Find an SHL overtime game and inspect its period-by-period events."""
 
-import json
 import requests
 
-BASE = "https://www.shl.se/api/gameday"
-
-# Verified game UUID from the SHL schedule response.
-GAME_UUID = "p2qoh7wot5"
+BASE = "https://www.shl.se/api"
+SCHEDULE_URL = f"{BASE}/sports-v2/game-schedule"
+PLAY_BY_PLAY_URL = f"{BASE}/gameday/play-by-play"
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0",
@@ -15,44 +13,78 @@ HEADERS = {
     "Referer": "https://www.shl.se/",
 }
 
-ENDPOINTS = [
-    "game-overview",
-    "play-by-play",
+PARAMS = {
+    "seasonUuid": "qeb-73bZkIm9A",
+    "seriesUuid": "qQ9-bb0bzEWUk",
+    "gameTypeUuid": "qQ9-af37Ti40B",
+}
+
+response = requests.get(
+    SCHEDULE_URL,
+    params=PARAMS,
+    headers=HEADERS,
+    timeout=30,
+)
+response.raise_for_status()
+
+games = response.json()
+print("Games in schedule:", len(games))
+
+overtime_games = [
+    game for game in games
+    if game.get("overtime") or game.get("shootout")
 ]
 
-for endpoint in ENDPOINTS:
-    url = f"{BASE}/{endpoint}/{GAME_UUID}"
+print("Games marked overtime/shootout:", len(overtime_games))
 
-    print("\n" + "=" * 70)
-    print("ENDPOINT:", endpoint)
-    print("URL:", url)
+if not overtime_games:
+    print("No overtime games found.")
+    raise SystemExit(0)
 
-    try:
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=30,
-        )
+game = overtime_games[0]
+game_uuid = game["uuid"]
 
-        print("HTTP:", response.status_code)
-        response.raise_for_status()
+print("\nSelected game:")
+print("UUID:", game_uuid)
+print("Date:", game.get("startDateTime"))
+print("Home:", game.get("homeTeamInfo", {}).get("names", {}).get("long"))
+print("Away:", game.get("awayTeamInfo", {}).get("names", {}).get("long"))
+print("Final home score:", game.get("homeTeamInfo", {}).get("score"))
+print("Final away score:", game.get("awayTeamInfo", {}).get("score"))
+print("Overtime:", game.get("overtime"))
+print("Shootout:", game.get("shootout"))
 
-        try:
-            data = response.json()
-            print("Response type:", type(data).__name__)
-            if isinstance(data, dict):
-                print("Top-level keys:", list(data.keys()))
+url = f"{PLAY_BY_PLAY_URL}/{game_uuid}"
+response = requests.get(
+    url,
+    headers=HEADERS,
+    timeout=30,
+)
+response.raise_for_status()
 
-            print(json.dumps(
-                data,
-                ensure_ascii=False,
-                indent=2,
-            )[:15000])
+events = response.json()
+print("\nPlay-by-play events:", len(events))
 
-        except ValueError:
-            print(response.text[:15000])
+if events:
+    print("Event fields:", list(events[0].keys()))
 
-    except Exception as error:
-        print("ERROR:", repr(error))
+print("\nEvents from period 3 onward:")
+for event in events:
+    period = event.get("period", 0)
 
-print("\nEndpoint inspection finished.")
+    if period >= 3:
+        home = event.get("homeTeam", {})
+        away = event.get("awayTeam", {})
+
+        print({
+            "period": period,
+            "time": event.get("time"),
+            "state": event.get("gameState"),
+            "revision": event.get("revision"),
+            "home_score": home.get("score"),
+            "away_score": away.get("score"),
+            "event_type": event.get("eventType"),
+            "description": event.get("description"),
+        })
+
+print("\nOvertime inspection finished.")
