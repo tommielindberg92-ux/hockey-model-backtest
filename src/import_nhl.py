@@ -36,32 +36,55 @@ def team_name(team):
         return name.get("default", "")
     return str(name)
 
+
 def get_regulation_result(game_id, home_id, away_id, decided_in):
-    """Return goals after 60 minutes and the outcome type from the scoreboard."""
+    """Return goals after 60 minutes and validate the result type."""
     if decided_in not in {"REG", "OT", "SO"}:
         raise ValueError(
             f"Okänd eller saknad sluttyp för match {game_id}: {decided_in}"
         )
 
     data = get_json(f"{BASE_URL}/gamecenter/{game_id}/play-by-play")
+    plays = data.get("plays")
+
+    if not isinstance(plays, list) or not plays:
+        raise ValueError(
+            f"Saknade eller ogiltiga målhändelser för match {game_id}"
+        )
 
     home_goals = 0
     away_goals = 0
 
-    for play in data.get("plays", []):
+    for play in plays:
         period = play.get("periodDescriptor", {}).get("number")
-        event_type = play.get("typeDescKey")
 
-        if event_type != "goal" or not isinstance(period, int) or period > 3:
+        if play.get("typeDescKey") != "goal":
+            continue
+
+        if not isinstance(period, int) or not 1 <= period <= 3:
             continue
 
         scoring_team = play.get("details", {}).get("eventOwnerTeamId")
+
         if scoring_team == home_id:
             home_goals += 1
         elif scoring_team == away_id:
             away_goals += 1
 
+    tied = home_goals == away_goals
+
+    if decided_in == "REG" and tied:
+        raise ValueError(
+            f"REG-match har oavgjort efter 60 minuter: {game_id}"
+        )
+
+    if decided_in in {"OT", "SO"} and not tied:
+        raise ValueError(
+            f"{decided_in}-match är inte oavgjord efter 60 minuter: {game_id}"
+        )
+
     return home_goals, away_goals, decided_in
+
 
 
 
