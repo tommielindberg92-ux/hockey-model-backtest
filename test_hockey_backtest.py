@@ -175,7 +175,7 @@ def test_nhl_regulation_result_excludes_shootout_goal(monkeypatch):
 
     monkeypatch.setattr("src.import_nhl.get_json", fake_get_json)
 
-    home, away, decided = get_regulation_result(123, 1, 2)
+    home, away, decided = get_regulation_result(123, 1, 2, "SO")
 
     assert home == 2
     assert away == 2
