@@ -141,3 +141,42 @@ def test_nhl_regulation_result_counts_three_periods():
     assert home == 2
     assert away == 1
     assert decided == "REG"
+def test_nhl_regulation_result_excludes_shootout_goal(monkeypatch):
+    def fake_get_json(url):
+        return {
+            "plays": [
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 1, "periodType": "REG"},
+                    "details": {"eventOwnerTeamId": 1},
+                },
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 2, "periodType": "REG"},
+                    "details": {"eventOwnerTeamId": 2},
+                },
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 3, "periodType": "REG"},
+                    "details": {"eventOwnerTeamId": 1},
+                },
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 3, "periodType": "REG"},
+                    "details": {"eventOwnerTeamId": 2},
+                },
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 5, "periodType": "SO"},
+                    "details": {"eventOwnerTeamId": 2},
+                },
+            ]
+        }
+
+    monkeypatch.setattr("src.import_nhl.get_json", fake_get_json)
+
+    home, away, decided = get_regulation_result(123, 1, 2)
+
+    assert home == 2
+    assert away == 2
+    assert decided == "SO"
