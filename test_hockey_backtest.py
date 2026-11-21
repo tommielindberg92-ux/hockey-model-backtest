@@ -185,3 +185,30 @@ def test_nhl_regulation_result_rejects_invalid_decision():
 
     with pytest.raises(ValueError, match="Okänd eller saknad sluttyp"):
         get_regulation_result(123, 1, 2, None)
+
+def test_nhl_regulation_result_rejects_missing_plays(monkeypatch):
+    monkeypatch.setattr(
+        "src.import_nhl.get_json",
+        lambda url: {"plays": []}
+    )
+
+    with pytest.raises(ValueError, match="Saknade eller ogiltiga"):
+        get_regulation_result(123, 1, 2, "OT")
+
+
+def test_nhl_regulation_result_rejects_inconsistent_decision(monkeypatch):
+    monkeypatch.setattr(
+        "src.import_nhl.get_json",
+        lambda url: {
+            "plays": [
+                {
+                    "typeDescKey": "goal",
+                    "periodDescriptor": {"number": 1},
+                    "details": {"eventOwnerTeamId": 1},
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError, match="OT-match"):
+        get_regulation_result(123, 1, 2, "OT")
