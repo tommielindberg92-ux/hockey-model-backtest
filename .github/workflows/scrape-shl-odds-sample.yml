@@ -1,5 +1,5 @@
 
-name: Diagnose OddsPortal access
+name: Diagnose BetExplorer SHL archive
 
 on:
   workflow_dispatch:
@@ -24,14 +24,19 @@ jobs:
           python -m pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Diagnose OddsPortal response
+      - name: Diagnose BetExplorer archive
         run: |
           mkdir -p artifacts
           python - <<'PY'
-          from playwright.sync_api import sync_playwright
           from pathlib import Path
+          from playwright.sync_api import sync_playwright
 
-          url = "https://www.oddsportal.com/hockey/sweden/shl-2024-2025/results/"
+          urls = [
+              "https://www.betexplorer.com/hockey/sweden/shl-2024-2025/results/",
+              "https://www.betexplorer.com/hockey/sweden/shl-2024-2025/",
+              "https://www.betexplorer.com/hockey/sweden/shl/results/",
+          ]
+
           output = []
 
           def log(value):
@@ -43,44 +48,81 @@ jobs:
                   user_agent=(
                       "Mozilla/5.0 (X11; Linux x86_64) "
                       "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
-                  )
+                  ),
+                  extra_http_headers={
+                      "Accept-Language": "en-US,en;q=0.9"
+                  }
               )
 
-              try:
-                  response = request.get(url, timeout=30000)
-                  log(f"REQUEST_STATUS: {response.status}")
-                  log(f"FINAL_URL: {response.url}")
-                  log(f"SERVER: {response.headers.get('server', 'unknown')}")
-                  log(f"CONTENT_TYPE: {response.headers.get('content-type', 'unknown')}")
-                  log("BODY_PREVIEW:")
-                  log(response.text()[:2000])
-              except Exception as error:
-                  log(f"REQUEST_ERROR: {error}")
+              for url in urls:
+                  log("")
+                  log("=" * 80)
+                  log(f"URL: {url}")
+
+                  try:
+                      response = request.get(url, timeout=30000)
+                      log(f"HTTP_STATUS: {response.status}")
+                      log(f"FINAL_URL: {response.url}")
+                      log(
+                          "CONTENT_TYPE: "
+                          + response.headers.get("content-type", "unknown")
+                      )
+
+                      body = response.text()
+                      log(f"BODY_LENGTH: {len(body)}")
+                      log("BODY_PREVIEW:")
+                      log(body[:3500])
+
+                      Path(
+                          "artifacts/betexplorer_"
+                          + str(urls.index(url) + 1)
+                          + ".html"
+                      ).write_text(body, encoding="utf-8")
+
+                  except Exception as error:
+                      log(f"REQUEST_ERROR: {error}")
 
               browser = p.chromium.launch(headless=True)
               page = browser.new_page()
 
-              try:
-                  response = page.goto(
-                      url,
-                      wait_until="domcontentloaded",
-                      timeout=45000
-                  )
-                  log(
-                      "BROWSER_STATUS: "
-                      + (str(response.status) if response else "no response")
-                  )
-                  log(f"BROWSER_FINAL_URL: {page.url}")
-                  log(f"PAGE_TITLE: {page.title()}")
-                  log("PAGE_TEXT:")
-                  log(page.locator("body").inner_text(timeout=10000)[:2000])
-              except Exception as error:
-                  log(f"BROWSER_ERROR: {error}")
-              finally:
-                  browser.close()
-                  request.dispose()
+              for url in urls:
+                  log("")
+                  log("=" * 80)
+                  log(f"BROWSER_URL: {url}")
 
-          Path("artifacts/oddsportal_diagnostic.txt").write_text(
+                  try:
+                      response = page.goto(
+                          url,
+                          wait_until="domcontentloaded",
+                          timeout=45000
+                      )
+
+                      log(
+                          "BROWSER_STATUS: "
+                          + (str(response.status) if response else "no response")
+                      )
+                      log(f"BROWSER_FINAL_URL: {page.url}")
+                      log(f"PAGE_TITLE: {page.title()}")
+
+                      body_text = page.locator("body").inner_text(timeout=10000)
+                      log("PAGE_TEXT:")
+                      log(body_text[:3500])
+
+                      log("MATCH_LINKS:")
+                      links = page.locator("a[href*='/match/']").evaluate_all(
+                          "(els) => els.slice(0, 15).map(a => ({"
+                          "text: a.innerText, href: a.href"
+                          "}))"
+                      )
+                      log(links)
+
+                  except Exception as error:
+                      log(f"BROWSER_ERROR: {error}")
+
+              browser.close()
+              request.dispose()
+
+          Path("artifacts/betexplorer_diagnostic.txt").write_text(
               "\n".join(output),
               encoding="utf-8"
           )
@@ -90,6 +132,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: oddsportal-diagnostic
+          name: betexplorer-diagnostic
           path: artifacts/
           if-no-files-found: warn
