@@ -1,13 +1,18 @@
 
+#!/usr/bin/env python3
+"""Audit public SHL statistics API across representative seasons."""
+
 import json
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
+from collections import Counter
 from datetime import datetime, timezone
+from pathlib import Path
+
+import requests
 
 BASE_URL = "https://www.shl.se/api/statistics-v2"
-SEASONS = [2000, 2010, 2016, 2020, 2024, 2025, 2026]
+OUTPUT_FILE = Path("shl_data_audit.json")
+COUNT = 1000
 
 MODULES = [
     "games_games",
@@ -22,242 +27,339 @@ MODULES = [
     "players_extendedMetrics",
 ]
 
-def fetch_json(url):
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (compatible; HockeyDataAudit/1.0)",
-            "Accept": "application/json",
-        },
-    )
+TARGET_YEARS = [2010, 2016, 2020, 2024, 2025, 2026]
 
-    for attempt in range(3):
+session = requests.Session()
+session.headers.update({
+    "User-Agent": "Mozilla/5.0 (compatible; SHLDataAudit/1.0)",
+    "Accept": "application/json, text/plain, */*",
+})
+
+
+def request_json(url, params=None, retries=3):
+    """Request JSON and retain useful diagnostics on failures."""
+    last_error = None
+
+    for attempt in range(retries):
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
-                body = response.read().decode("utf-8")
-                return json.loads(body), None
-        except Exception as error:
-            if attempt == 2:
-                return None, str(error)
-            time.sleep(2)
+            response = session.get(
+                url,
+                params=params,
+                timeout=45,
+            )
 
-def find_lists(obj, path="$"):
-    found = []
+            body = response.text or ""
 
-    if isinstance(obj, list):
-        dictionaries = [item for item in obj if isinstance(item, dict)]
-        if dictionaries:
-            found.append({
-                "path": path,
-                "count": len(obj),
-                "rows": dictionaries,
-            })
-        for index, item in enumerate(obj[:3]):
-            found.extend(find_lists(item, f"{path}[{index}]"))
+            if response.status_code != 200:
+                raise RuntimeError(
+                    f"HTTP {response.status_code}; "
+                    f"body={body[:500]!r}"
+                )
 
-    elif isinstance(obj, dict):
-        for key, value in obj.items():
-            found.extend(find_lists(value, f"{path}.{key}"))
+            if not body.strip():
+                raise RuntimeError("HTTP 200 but response body is empty")
+
+            try:
+                return response.json(), {
+                    "http_status": response.status_code,
+                    "response_bytes": len(response.content),
+                    "request_url": response.url,
+                }
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Invalid JSON: {exc}; body={body[:500]!r}"
+                ) from exc
+
+        except Exception as exc:
+            last_error = str(exc)
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+
+    return None, {
+        "error": last_error or "Unknown request error",
+        "request_url": url,
+    }
+
+
+def walk_dicts(value):
+    """Yield every dictionary in a nested JSON structure."""
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk_dicts(child)
+
+
+def get_season_catalog(layout):
+    """Extract SHL regular-season UUIDs from layout-info."""
+    catalog = {}
+
+    for item in walk_dicts(layout):
+        season = item.get("season")
+        game_type = item.get("gameType")
+        series = item.get("series")
+        uuid = item.get("ssgtUuid")
+
+        if not all(isinstance(x, dict) for x in (
+            season, game_type, series
+        )):
+            continue
+
+        season_code = season.get("code")
+        game_type_code = game_type.get("code")
+        series_code = series.get("code")
+
+        if not uuid or not season_code:
+            continue
+
+        try:
+            year = int(season_code)
+        except (TypeError, ValueError):
+            continue
+
+        if series_code == "SHL" and game_type_code == "regular":
+            catalog[year] = {
+                "ssgt_uuid": uuid,
+                "season_name": season.get("name"),
+                "state": item.get("state"),
+            }
+
+    return catalog
+
+
+def choose_sample_years(available_years):
+    """Choose representative years that actually exist in the catalog."""
+    if not available_years:
+        return []
+
+    chosen = set()
+
+    # Include the oldest available season.
+    chosen.add(min(available_years))
+
+    # Select the closest available year to each target.
+    for target in TARGET_YEARS:
+        chosen.add(min(
+            available_years,
+            key=lambda year: (abs(year - target), year),
+        ))
+
+    return sorted(chosen)
+
+
+def find_largest_record_list(payload):
+    """Find the largest list of dictionaries in an API response."""
+    candidates = []
+
+    def visit(value, path="$"):
+        if isinstance(value, list):
+            dict_rows = [x for x in value if isinstance(x, dict)]
+            if dict_rows:
+                candidates.append((len(dict_rows), path, dict_rows))
+
+            for index, child in enumerate(value):
+                visit(child, f"{path}[{index}]")
+
+        elif isinstance(value, dict):
+            for key, child in value.items():
+                visit(child, f"{path}.{key}")
+
+    visit(payload)
+
+    if not candidates:
+        return [], None
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, path, rows = candidates[0]
+    return rows, path
+
+
+def find_total_count(payload):
+    """Find totalCount or similar metadata anywhere in the response."""
+    for item in walk_dicts(payload):
+        for key in ("totalCount", "total_count", "total"):
+            value = item.get(key)
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, str) and value.isdigit():
+                return int(value)
+    return None
+
+
+def flatten_keys(value, prefix=""):
+    """Return flattened field names for coverage analysis."""
+    found = set()
+
+    if isinstance(value, dict):
+        for key, child in value.items():
+            name = f"{prefix}.{key}" if prefix else str(key)
+            found.add(name)
+            found.update(flatten_keys(child, name))
+
+    elif isinstance(value, list):
+        for child in value[:3]:
+            found.update(flatten_keys(child, prefix))
 
     return found
 
-def find_metadata(obj):
-    metadata = {}
 
-    def walk(value):
-        if isinstance(value, dict):
-            for key, item in value.items():
-                normalized = key.lower().replace("_", "")
-                if normalized in (
-                    "totalcount",
-                    "count",
-                    "total",
-                    "page",
-                    "pagesize",
-                    "offset",
-                ):
-                    if isinstance(item, (int, float, str)):
-                        metadata[key] = item
-                walk(item)
-        elif isinstance(value, list):
-            for item in value[:3]:
-                walk(item)
-
-    walk(obj)
-    return metadata
-
-def flatten_row(row, prefix=""):
-    result = {}
-
-    if isinstance(row, dict):
-        for key, value in row.items():
-            name = f"{prefix}.{key}" if prefix else str(key)
-
-            if isinstance(value, dict):
-                result.update(flatten_row(value, name))
-            elif isinstance(value, list):
-                result[name] = value
-            else:
-                result[name] = value
-
-    return result
-
-def is_populated(value):
-    if value is None:
-        return False
-    if isinstance(value, str):
-        return value.strip() != ""
-    if isinstance(value, (list, dict)):
-        return len(value) > 0
-    return True
-
-def audit_module(season, module):
-    params = urllib.parse.urlencode({
-        "count": 1000,
-        "season": season,
-        "gameType": "regular",
-    })
-
-    url = f"{BASE_URL}/stats-info/{module}?{params}"
-    payload, error = fetch_json(url)
-
-    result = {
-        "season": season,
-        "module": module,
-        "url": url,
-        "error": error,
+def audit_module(year, season_info, module):
+    url = f"{BASE_URL}/stats-info/{module}"
+    params = {
+        "count": COUNT,
+        "ssgtUuid": season_info["ssgt_uuid"],
     }
 
-    if error or payload is None:
+    payload, request_info = request_json(url, params=params)
+
+    result = {
+        "season_year": year,
+        "season_name": season_info.get("season_name"),
+        "module": module,
+        **request_info,
+    }
+
+    if payload is None:
+        result.update({
+            "success": False,
+            "row_count": 0,
+            "total_count": None,
+            "truncated_or_incomplete": None,
+            "fields": [],
+            "field_coverage": {},
+        })
         return result
 
-    result["response_type"] = type(payload).__name__
+    rows, rows_path = find_largest_record_list(payload)
+    total_count = find_total_count(payload)
 
-    if isinstance(payload, dict):
-        result["top_level_keys"] = list(payload.keys())
-    else:
-        result["top_level_keys"] = []
+    field_counts = Counter()
+    for row in rows:
+        field_counts.update(flatten_keys(row))
 
-    result["metadata"] = find_metadata(payload)
+    coverage = {
+        field: round(count / len(rows) * 100, 1)
+        for field, count in sorted(field_counts.items())
+    }
 
-    candidates = find_lists(payload)
-    candidates.sort(key=lambda item: len(item["rows"]), reverse=True)
+    truncated = False
+    if len(rows) >= COUNT:
+        truncated = True
+    if total_count is not None and len(rows) < total_count:
+        truncated = True
 
-    if not candidates:
-        result["returned_rows"] = 0
-        result["data_found"] = False
-        result["sample"] = str(payload)[:1500]
-        return result
-
-    best = candidates[0]
-    rows = best["rows"]
-
-    result["data_path"] = best["path"]
-    result["returned_rows"] = len(rows)
-    result["data_found"] = True
-    result["sample_row"] = rows[0]
-
-    flattened = [flatten_row(row) for row in rows]
-    all_fields = sorted({
-        field
-        for row in flattened
-        for field in row
+    result.update({
+        "success": True,
+        "response_type": type(payload).__name__,
+        "top_level_keys": (
+            list(payload.keys())[:50]
+            if isinstance(payload, dict)
+            else None
+        ),
+        "rows_path": rows_path,
+        "row_count": len(rows),
+        "total_count": total_count,
+        "truncated_or_incomplete": truncated,
+        "fields": sorted(field_counts.keys()),
+        "field_coverage": coverage,
     })
 
-    coverage = {}
-
-    for field in all_fields:
-        populated = sum(
-            1 for row in flattened
-            if is_populated(row.get(field))
-        )
-        coverage[field] = {
-            "populated": populated,
-            "total": len(flattened),
-            "percentage": round(
-                100 * populated / len(flattened), 1
-            ) if flattened else 0,
-        }
-
-    result["field_coverage"] = coverage
-
-    metadata = result["metadata"]
-    total_count = None
-
-    for key, value in metadata.items():
-        if key.lower().replace("_", "") == "totalcount":
-            try:
-                total_count = int(value)
-            except (TypeError, ValueError):
-                pass
-
-    result["total_count_reported"] = total_count
-
-    if total_count is not None:
-        result["possible_truncation"] = (
-            total_count > len(rows) or len(rows) >= 1000
-        )
-    else:
-        result["possible_truncation"] = len(rows) >= 1000
-
     return result
+
 
 def main():
     started = datetime.now(timezone.utc).isoformat()
 
-    print("Hämtar SHL:s säsongs- och layoutinformation...")
-    layout_url = f"{BASE_URL}/layout-info"
-    layout, layout_error = fetch_json(layout_url)
+    print("Fetching SHL layout-info...")
+    layout, layout_info = request_json(
+        f"{BASE_URL}/layout-info"
+    )
 
-    report = {
-        "created_utc": started,
-        "layout_url": layout_url,
-        "layout_error": layout_error,
-        "layout": layout,
-        "requested_seasons": SEASONS,
-        "modules": MODULES,
-        "results": [],
-    }
-
-    for season in SEASONS:
-        for module in MODULES:
-            print(f"Kontrollerar säsong {season}: {module}")
-
-            result = audit_module(season, module)
-            report["results"].append(result)
-
-            print(
-                "  Rader:",
-                result.get("returned_rows", 0),
-                "| Fel:",
-                result.get("error"),
-            )
-
-            time.sleep(1)
-
-    with open("shl_data_audit.json", "w", encoding="utf-8") as file:
-        json.dump(
-            report,
-            file,
-            ensure_ascii=False,
-            indent=2,
+    if layout is None:
+        raise RuntimeError(
+            f"Could not retrieve SHL layout-info: {layout_info}"
         )
 
-    successful = [
-        item for item in report["results"]
-        if not item.get("error")
-    ]
+    catalog = get_season_catalog(layout)
+    available_years = sorted(catalog)
+    sample_years = choose_sample_years(available_years)
 
-    populated = [
-        item for item in successful
-        if item.get("returned_rows", 0) > 0
-    ]
+    print(f"Available SHL regular seasons: {len(available_years)}")
+    print(f"Sampled seasons: {sample_years}")
 
-    print("\n========== SHL AUDIT KLAR ==========")
-    print("Kontrollerade kombinationer:", len(report["results"]))
-    print("Lyckade API-anrop:", len(successful))
-    print("Anrop med data:", len(populated))
-    print("Rapport: shl_data_audit.json")
+    if not sample_years:
+        raise RuntimeError(
+            "No SHL regular seasons with ssgtUuid were found in layout-info"
+        )
+
+    results = []
+
+    for year in sample_years:
+        season_info = catalog[year]
+
+        for module in MODULES:
+            print(f"Auditing {year}: {module}")
+            result = audit_module(year, season_info, module)
+            results.append(result)
+
+            if not result.get("success"):
+                print(f"  FAILED: {result.get('error')}")
+            else:
+                print(
+                    f"  rows={result.get('row_count')}, "
+                    f"total={result.get('total_count')}, "
+                    f"fields={len(result.get('fields', []))}, "
+                    f"truncated={result.get('truncated_or_incomplete')}"
+                )
+
+            # Be gentle to the public API.
+            time.sleep(1)
+
+    success_count = sum(
+        1 for result in results if result.get("success")
+    )
+
+    report = {
+        "audit_started_utc": started,
+        "audit_finished_utc": datetime.now(timezone.utc).isoformat(),
+        "source": BASE_URL,
+        "method": (
+            "layout-info lookup followed by stats-info requests "
+            "using ssgtUuid"
+        ),
+        "layout_request": layout_info,
+        "available_regular_season_years": available_years,
+        "sampled_seasons": [
+            {
+                "year": year,
+                **catalog[year],
+            }
+            for year in sample_years
+        ],
+        "modules": MODULES,
+        "request_count": len(results),
+        "successful_requests": success_count,
+        "failed_requests": len(results) - success_count,
+        "results": results,
+    }
+
+    OUTPUT_FILE.write_text(
+        json.dumps(report, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    print()
+    print("SHL audit finished.")
+    print(f"Successful requests: {success_count}/{len(results)}")
+    print(f"Report saved to: {OUTPUT_FILE}")
+
+    if success_count == 0:
+        raise RuntimeError(
+            "All stats-info requests failed. See report diagnostics."
+        )
+
 
 if __name__ == "__main__":
     main()
