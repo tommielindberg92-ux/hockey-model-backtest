@@ -249,7 +249,10 @@ def train_models(feature_rows, targets):
             cat_features=CATEGORICAL,
         )
 
-    return draw_model, direction_model
+    return draw_model, direction_model, (
+    non_draw_count / max(1, draw_count)
+    if draw_model is not None else 1.0
+)
 
 
 def backtest(matches):
