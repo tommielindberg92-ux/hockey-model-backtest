@@ -1,13 +1,13 @@
 
-name: Scrape SHL historical odds sample
+name: Diagnose OddsPortal access
 
 on:
   workflow_dispatch:
 
 jobs:
-  scrape:
+  diagnose:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 20
 
     steps:
       - name: Checkout
@@ -18,32 +18,78 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install OddsHarvester
+      - name: Install Playwright
         run: |
           python -m pip install --upgrade pip
-          python -m pip install "oddsharvester==0.20.0"
+          python -m pip install playwright
           python -m playwright install --with-deps chromium
 
-      - name: Scrape SHL 2024/25 sample
+      - name: Diagnose OddsPortal response
         run: |
           mkdir -p artifacts
-          oddsharvester historic \
-            --sport ice-hockey \
-            --league shl \
-            --season 2024-2025 \
-            --market 1x2 \
-            --period full_time \
-            --max-pages 1 \
-            --format csv \
-            --output artifacts/shl_2024_2025_sample.csv \
-            --headless \
-            --concurrency 1 \
-            --request-delay 2
+          python - <<'PY'
+          from playwright.sync_api import sync_playwright
+          from pathlib import Path
 
-      - name: Upload sample
+          url = "https://www.oddsportal.com/hockey/sweden/shl-2024-2025/results/"
+          output = []
+
+          def log(value):
+              print(value)
+              output.append(str(value))
+
+          with sync_playwright() as p:
+              request = p.request.new_context(
+                  user_agent=(
+                      "Mozilla/5.0 (X11; Linux x86_64) "
+                      "AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36"
+                  )
+              )
+
+              try:
+                  response = request.get(url, timeout=30000)
+                  log(f"REQUEST_STATUS: {response.status}")
+                  log(f"FINAL_URL: {response.url}")
+                  log(f"SERVER: {response.headers.get('server', 'unknown')}")
+                  log(f"CONTENT_TYPE: {response.headers.get('content-type', 'unknown')}")
+                  log("BODY_PREVIEW:")
+                  log(response.text()[:2000])
+              except Exception as error:
+                  log(f"REQUEST_ERROR: {error}")
+
+              browser = p.chromium.launch(headless=True)
+              page = browser.new_page()
+
+              try:
+                  response = page.goto(
+                      url,
+                      wait_until="domcontentloaded",
+                      timeout=45000
+                  )
+                  log(
+                      "BROWSER_STATUS: "
+                      + (str(response.status) if response else "no response")
+                  )
+                  log(f"BROWSER_FINAL_URL: {page.url}")
+                  log(f"PAGE_TITLE: {page.title()}")
+                  log("PAGE_TEXT:")
+                  log(page.locator("body").inner_text(timeout=10000)[:2000])
+              except Exception as error:
+                  log(f"BROWSER_ERROR: {error}")
+              finally:
+                  browser.close()
+                  request.dispose()
+
+          Path("artifacts/oddsportal_diagnostic.txt").write_text(
+              "\n".join(output),
+              encoding="utf-8"
+          )
+          PY
+
+      - name: Upload diagnostic
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: shl-odds-sample
+          name: oddsportal-diagnostic
           path: artifacts/
           if-no-files-found: warn
