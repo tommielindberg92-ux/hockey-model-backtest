@@ -36,20 +36,15 @@ def team_name(team):
         return name.get("default", "")
     return str(name)
 
-
 def get_regulation_result(game_id, home_id, away_id):
     data = get_json(f"{BASE_URL}/gamecenter/{game_id}/play-by-play")
 
     home_goals = 0
     away_goals = 0
-    
 
     for play in data.get("plays", []):
         period = play.get("periodDescriptor", {}).get("number")
-        period_type = play.get("periodDescriptor", {}).get("periodType")
         event_type = play.get("typeDescKey")
-
-        
 
         if event_type != "goal" or not isinstance(period, int) or period > 3:
             continue
@@ -60,20 +55,16 @@ def get_regulation_result(game_id, home_id, away_id):
         elif scoring_team == away_id:
             away_goals += 1
 
-        game_outcome = data.get("gameOutcome") or {}
+    game_outcome = data.get("gameOutcome") or {}
     decided_in = game_outcome.get("lastPeriodType")
 
     if decided_in not in {"REG", "OT", "SO"}:
         raise ValueError(
             f"Okänd eller saknad sluttyp för match {game_id}: {decided_in}"
         )
-    else:
-        raise ValueError(
-            f"Kan inte avgöra hur match {game_id} avgjordes "
-            "trots oavgjort efter 60 minuter"
-        )
 
     return home_goals, away_goals, decided_in
+
 
 
 def import_nhl(start_date, end_date, output_file):
