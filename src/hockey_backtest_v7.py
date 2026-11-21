@@ -434,7 +434,7 @@ def main():
             f"{league} {season}/{season + 1}: "
             f"matcher={len(group)}, "
             f"hemma_MAE={home_mae:.3f}, "
-            f borta_MAE={away_mae:.3f}, "
+            f"borta_MAE={away_mae:.3f}, "
             f"total_bias={total_bias:+.3f}"
         )
 
