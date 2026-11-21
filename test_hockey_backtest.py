@@ -180,3 +180,8 @@ def test_nhl_regulation_result_excludes_shootout_goal(monkeypatch):
     assert home == 2
     assert away == 2
     assert decided == "SO"
+def test_nhl_regulation_result_rejects_invalid_decision():
+    import pytest
+
+    with pytest.raises(ValueError, match="Okänd eller saknad sluttyp"):
+        get_regulation_result(123, 1, 2, None)
