@@ -46,7 +46,7 @@ def get_games(season, phase):
         method="POST",
     )
 
-    with urlopen(request, timeout=30) as response:
+    with urlopen(request, timeout=120) as response:
         payload = json.loads(response.read().decode("utf-8"))
 
     if isinstance(payload, list):
