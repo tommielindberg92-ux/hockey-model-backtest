@@ -1,0 +1,26 @@
+
+name: Compare Hockey Models V2 and V3
+
+on:
+  workflow_dispatch:
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Compare V2 and V3
+        run: |
+          python -m src.compare_v2_v3 \
+            --input data/ha_matches.csv
