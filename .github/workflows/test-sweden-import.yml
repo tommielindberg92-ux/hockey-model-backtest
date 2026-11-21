@@ -1,12 +1,16 @@
 
-name: Import historical HockeyAllsvenskan data
+name: Import historical Swedish hockey data
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   import-history:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - name: Check out repository
@@ -20,10 +24,10 @@ jobs:
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
 
-      - name: Import all regular seasons
+      - name: Import all regular HockeyAllsvenskan seasons
         run: |
           for season in $(seq 2006 2026); do
-            echo "Importerar säsongen $((season-1))/$season"
+            echo "Importerar HockeyAllsvenskan $((season-1))/$season"
             python -m src.import_sweden \
               --season "$season" \
               --phase HA \
@@ -31,10 +35,19 @@ jobs:
             sleep 1
           done
 
-      - name: Validate historical data
+      - name: Import SHL seasons and current HA season
+        run: |
+          python -m src.import_sweden \
+            --season 2026 \
+            --phase HA \
+            --include-shl \
+            --output data/ha_matches.csv
+
+      - name: Validate imported data
         run: |
           python - <<'PY'
           import csv
+          from collections import Counter
           from pathlib import Path
 
           path = Path("data/ha_matches.csv")
@@ -42,11 +55,22 @@ jobs:
               rows = list(csv.DictReader(file))
 
           if not rows:
-              raise SystemExit("Ingen historisk data importerades.")
+              raise SystemExit("Ingen data importerades.")
+
+          counts = Counter(row["league"] for row in rows)
+          if counts["SHL"] == 0:
+              raise SystemExit("SHL-importen gav inga matcher.")
+          if counts["HockeyAllsvenskan"] == 0:
+              raise SystemExit("HockeyAllsvenskan saknar matcher.")
 
           keys = set()
           for row in rows:
-              key = (row["date"], row["league"], row["home_team"], row["away_team"])
+              key = (
+                  row["date"],
+                  row["league"],
+                  row["home_team"],
+                  row["away_team"],
+              )
               if key in keys:
                   raise SystemExit(f"Dublett hittad: {key}")
               keys.add(key)
@@ -56,19 +80,30 @@ jobs:
               decision = row["decided_in"]
 
               if home < 0 or away < 0:
-                  raise SystemExit("Negativt målantal.")
-              if decision == "FT" and home == away:
-                  raise SystemExit("FT-match oavgjord efter 60 minuter.")
-              if decision in {"OT", "SO"} and home != away:
-                  raise SystemExit("OT/SO-match ej oavgjord efter 60 minuter.")
+                  raise SystemExit(f"Negativt målantal: {key}")
 
-          print(f"Godkänt: {len(rows)} matcher.")
+              if decision == "FT" and home == away:
+                  raise SystemExit(f"FT-match oavgjord: {key}")
+
+              if decision in {"OT", "SO"} and home != away:
+                  raise SystemExit(f"OT/SO-match ej oavgjord efter 60 min: {key}")
+
+              if decision not in {"FT", "OT", "SO"}:
+                  raise SystemExit(f"Okänd beslutsform: {decision}")
+
+              if not row["source"]:
+                  raise SystemExit(f"Saknar källreferens: {key}")
+
+          print(f"Totalt godkända matcher: {len(rows)}")
+          for league, count in sorted(counts.items()):
+              print(f"{league}: {count}")
           print(f"Första match: {rows[0]['date']}")
           print(f"Sista match: {rows[-1]['date']}")
+          print("Alla datakontroller godkända.")
           PY
 
-      - name: Upload historical CSV
+      - name: Upload historical Swedish data
         uses: actions/upload-artifact@v4
         with:
-          name: hockeyallsvenskan-historical
+          name: swedish-historical-matches
           path: data/ha_matches.csv
