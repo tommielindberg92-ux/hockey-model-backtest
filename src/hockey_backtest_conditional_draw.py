@@ -1,10 +1,10 @@
 
 """Conditional draw experiment based on V7.
 
-Uses V7 predictions as the baseline and tests whether draw probability
-can be improved using expected total goals and expected goal difference.
+Tests whether V7's calibrated draw probability can be improved
+using expected total goals and expected goal difference.
 
-All predictions concern regulation time (60 minutes).
+Predictions are for regulation time (60 minutes).
 Training is league-specific and uses only earlier matches.
 """
 
@@ -42,8 +42,8 @@ def logit(probabilities):
 
 
 def make_features(frame):
-    """Build features using only V7 pre-match predictions."""
-    base_draw = logit(frame["raw_px"].to_numpy(dtype=float))
+    """Build features from V7's pre-match predictions."""
+    base_draw = logit(frame["px"].to_numpy(dtype=float))
 
     total_goals = frame[
         "expected_total_goals"
@@ -61,7 +61,7 @@ def make_features(frame):
 
 
 def fit_logistic_model(features, targets):
-    """Fit a regularized logistic regression using NumPy Newton steps."""
+    """Fit regularized logistic regression using NumPy Newton steps."""
     x = np.asarray(features, dtype=float)
     y = np.asarray(targets, dtype=float)
 
@@ -176,6 +176,29 @@ def backtest(matches):
 
     data = v7.copy()
 
+    required = {
+        "date",
+        "league",
+        "home_team",
+        "away_team",
+        "px",
+        "p1",
+        "p2",
+        "expected_total_goals",
+        "expected_goal_difference",
+        "actual",
+        "predicted",
+        "correct",
+        "brier",
+        "log_loss",
+    }
+
+    missing = required - set(data.columns)
+    if missing:
+        raise ValueError(
+            f"V7 output is missing required columns: {sorted(missing)}"
+        )
+
     data["date"] = pd.to_datetime(data["date"])
     data["match_day"] = data["date"].dt.normalize()
     data["season"] = data["date"].apply(season_key)
@@ -185,11 +208,11 @@ def backtest(matches):
         kind="stable",
     ).reset_index(drop=True)
 
-    data["_actual_draw"] = (
-        data["actual"] == "X"
-    ).astype(int)
+    features = make_features(data)
 
-    data["_features"] = list(make_features(data))
+    data["_feature_0"] = features[:, 0]
+    data["_feature_1"] = features[:, 1]
+    data["_feature_2"] = features[:, 2]
 
     models = {}
     current_seasons = {}
@@ -198,16 +221,13 @@ def backtest(matches):
 
     output = []
 
-    for match_day, day in data.groupby(
-        "match_day",
-        sort=True,
-    ):
+    for match_day, day in data.groupby("match_day", sort=True):
         day_records = []
 
-        # Fit only at season boundaries, using earlier matches.
-        for row in day.itertuples(index=False):
-            league = str(row.league)
-            season = int(row.season)
+        # Fit at season boundaries, using earlier matches only.
+        for _, row in day.iterrows():
+            league = str(row["league"])
+            season = int(row["season"])
 
             if league not in models:
                 models[league] = None
@@ -236,23 +256,31 @@ def backtest(matches):
                 else:
                     models[league] = None
 
-        # All matches on this date are predicted before any
-        # results from the same date enter the training history.
-        for row in day.itertuples(index=False):
-            league = str(row.league)
+        # Predict every match on this date before updating history.
+        for _, row in day.iterrows():
+            league = str(row["league"])
 
             base_probabilities = np.asarray(
-                [row.p1, row.px, row.p2],
+                [
+                    row["p1"],
+                    row["px"],
+                    row["p2"],
+                ],
                 dtype=float,
             )
 
-            features = np.asarray(row._asdict()["_features"])
+            row_features = np.asarray([
+                row["_feature_0"],
+                row["_feature_1"],
+                row["_feature_2"],
+            ], dtype=float)
+
             model = models[league]
 
             if model is None:
-                raw_model_draw = float(row.px)
+                raw_model_draw = float(row["px"])
                 shrinkage = 0.0
-                final_draw = float(row.px)
+                final_draw = float(row["px"])
                 training_count = len(
                     historical_targets[league]
                 )
@@ -260,7 +288,7 @@ def backtest(matches):
                 raw_model_draw = float(
                     predict_draw_probability(
                         model,
-                        features.reshape(1, -1),
+                        row_features.reshape(1, -1),
                     )[0]
                 )
 
@@ -272,7 +300,7 @@ def backtest(matches):
 
                 final_draw = (
                     shrinkage * raw_model_draw
-                    + (1.0 - shrinkage) * float(row.px)
+                    + (1.0 - shrinkage) * float(row["px"])
                 )
 
             probabilities = adjust_probabilities(
@@ -280,20 +308,22 @@ def backtest(matches):
                 final_draw,
             )[0]
 
-            actual_index = (
-                0 if row.actual == "1"
-                else 1 if row.actual == "X"
-                else 2
-            )
+            actual = str(row["actual"])
 
+            if actual not in ("1", "X", "2"):
+                raise ValueError(
+                    f"Unexpected actual outcome: {actual}"
+                )
+
+            actual_index = ("1", "X", "2").index(actual)
             one_hot = np.eye(3)[actual_index]
             predicted_index = int(np.argmax(probabilities))
 
             day_records.append({
-                "date": row.date,
+                "date": row["date"],
                 "league": league,
-                "home_team": row.home_team,
-                "away_team": row.away_team,
+                "home_team": row["home_team"],
+                "away_team": row["away_team"],
 
                 "p1": float(probabilities[0]),
                 "px": float(probabilities[1]),
@@ -303,7 +333,7 @@ def backtest(matches):
                 "conditional_shrinkage": shrinkage,
                 "conditional_training_matches": training_count,
 
-                "actual": row.actual,
+                "actual": actual,
                 "predicted": ("1", "X", "2")[predicted_index],
                 "correct": int(predicted_index == actual_index),
 
@@ -317,21 +347,21 @@ def backtest(matches):
                     )
                 ),
 
-                # V7 baseline metrics for direct comparison.
-                "v7_p1": float(row.p1),
-                "v7_px": float(row.px),
-                "v7_p2": float(row.p2),
-                "v7_predicted": row.predicted,
-                "v7_correct": int(row.correct),
-                "v7_brier": float(row.brier),
-                "v7_log_loss": float(row.log_loss),
+                # V7 baseline for direct comparison.
+                "v7_p1": float(row["p1"]),
+                "v7_px": float(row["px"]),
+                "v7_p2": float(row["p2"]),
+                "v7_predicted": str(row["predicted"]),
+                "v7_correct": int(row["correct"]),
+                "v7_brier": float(row["brier"]),
+                "v7_log_loss": float(row["log_loss"]),
 
-                "_features": features,
-                "_target": int(row.actual == "X"),
+                "_features": row_features,
+                "_target": int(actual == "X"),
             })
 
-        # Update the training history only after all predictions
-        # for the date have been generated.
+        # Only after all same-day predictions are complete
+        # may the day's results enter the training history.
         for record in day_records:
             league = record["league"]
 
@@ -413,6 +443,11 @@ def print_metrics(results, title):
     )
     print(
         f"Ny modell: {(results.predicted == 'X').sum()}"
+    )
+
+    print("\nAntal matcher med tränad justeringsmodell:")
+    print(
+        (results.conditional_training_matches > 0).sum()
     )
 
 
